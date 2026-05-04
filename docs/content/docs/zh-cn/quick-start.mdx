@@ -1,0 +1,82 @@
+---
+title: 快速开始
+description: 几分钟把 Vulcan 跑起来。
+---
+
+从零到"Vulcan 给我回话"大概五分钟。你需要装好 [`uv`](https://docs.astral.sh/uv/);如果走 Claude Code 这条路,还得提前在终端里登录好 `claude` CLI。
+
+## 1. 安装
+
+```bash
+git clone https://github.com/vulcan-community/vulcan-agent.git
+cd vulcan-agent
+uv sync --extra claude-code
+```
+
+把 `claude-code` 换成 `feishu`,或者两个都要就用逗号分隔——按你想用的来。
+
+## 2. 放一份配置
+
+新建 `~/.vulcan/vulcan.json`,最小能跑的版本是这样:
+
+```json
+{
+  "version": "0.1",
+  "runtimes": {
+    "claude-code": {
+      "enable": true,
+      "model": {
+        "name": "claude-sonnet-4-5",
+        "provider": "anthropic",
+        "base_url": "",
+        "api_key": ""
+      }
+    }
+  },
+  "channels": {}
+}
+```
+
+`api_key` 和 `base_url` 留空,Vulcan 就用你 `claude` CLI 已有的登录态。想接到别的端点就把它们填上——详见 [挑一个模型](/docs/runtimes)。
+
+## 3. 启动
+
+```python
+from pathlib import Path
+from vulcan.gateway.gateway import Gateway
+
+Gateway(home_dir=Path("~/.vulcan").expanduser()).start()
+```
+
+存成 `run.py`,然后 `uv run python run.py`。Vulcan 监听在 `http://0.0.0.0:4000`。
+
+## 4. 打个招呼
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: default" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
+```
+
+应该能拿到回复。下次发请求继续用同一个 `X-Session-Id`,Vulcan 会接着上回的对话。
+
+## 几个常用命令
+
+```bash
+vulcan runtime list                 # 看现在有哪些
+vulcan runtime install claude-code  # 装某个 runtime 的依赖
+vulcan runtime uninstall claude-code
+```
+
+## 调成你的样
+
+Vulcan 的人格藏在 `~/.vulcan/agent/IDENTITY.md`、`SOUL.md`、`TOOL.md` 这三份 Markdown 里——首次启动时自动拷过来。改它们能调整 Vulcan 怎么自我介绍、说话风格、习惯用哪些工具。改完重启 Vulcan 就生效。
+
+## 接下来
+
+- 接一个聊天工具,比如飞书——见 [接入聊天工具](/docs/channels)。
+- 用斜杠命令操控 Vulcan——见 [斜杠命令](/docs/commands)。

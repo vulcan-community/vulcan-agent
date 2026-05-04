@@ -1,0 +1,55 @@
+---
+title: What's inside
+description: How Vulcan keeps your chats, models, and apps glued together.
+---
+
+Vulcan sits between the chat apps you use and the AI models you want to talk to. You configure it once, and it handles the boring parts: keeping track of every conversation, remembering where you left off, and routing each message to whichever model you've picked.
+
+Here's the rough idea.
+
+```text
+  Your chat apps                     The model you picked
+  (Feishu, the API,         ┌──►   (Claude Code, ChatGPT,
+   curl, your own UI)       │       DeepSeek, your own deploy)
+        │                   │
+        ▼                   │
+   ┌─────────────┐          │
+   │   Vulcan    │──────────┘
+   │ (the post   │
+   │   office)   │
+   └─────────────┘
+        │
+        ▼
+   Your conversations,
+   saved on your machine
+```
+
+## One conversation, many places
+
+You can talk to Vulcan from a chat app on your phone, from your terminal with `curl`, or from any tool that speaks the OpenAI API. It's the same Vulcan underneath, looking at the same conversations. Send a message from Feishu in the morning, pick it up from your laptop in the afternoon, and Vulcan still knows what you were on about.
+
+## Your history is yours
+
+Every chat is saved as a plain text file on your own machine. No cloud, no third party. Only the model you pick sees the message you're sending right now — Vulcan keeps everything else local. If you want to back it up, copy the folder. If you want to read what you said two weeks ago, open the file.
+
+## Switch models without losing your place
+
+Vulcan can talk to several model "brains" at once. You pick one as your default, and you can hop to another mid-conversation with a slash command — the chat keeps going, but now a different model is replying. Useful when you want Claude's coding chops for one question and a cheaper model for the next.
+
+See [Pick a model](/docs/runtimes) for which brains are supported.
+
+## Slash commands for everything else
+
+You don't need a separate dashboard to manage Vulcan. From any chat, type a slash command and Vulcan responds inline — list your past sessions, switch models, peek at a transcript, no UI needed. See [Slash commands](/docs/commands).
+
+## Where things live
+
+Vulcan keeps everything under a single folder in your home directory:
+
+| Path                              | What's there                            |
+| --------------------------------- | --------------------------------------- |
+| `~/.vulcan/vulcan.json`           | Your config — models, chat apps, keys   |
+| `~/.vulcan/agent/`                | Vulcan's personality (you can edit it)  |
+| `~/.vulcan/sessions/`             | Every conversation, one file each       |
+
+Edit, back up, or delete anything in there. Vulcan re-reads the config on restart.

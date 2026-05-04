@@ -1,0 +1,4 @@
+{
+  "title": "Vulcan Agent",
+  "pages": ["index", "quick-start", "architecture", "runtimes", "channels", "commands"]
+}

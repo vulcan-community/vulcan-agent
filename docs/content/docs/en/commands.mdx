@@ -1,0 +1,47 @@
+---
+title: Slash commands
+description: Inspect and steer Vulcan from inside any chat.
+---
+
+From any chat, you can type a slash command to inspect or change Vulcan's state — no UI required. Just send the command as a regular message and Vulcan replies inline.
+
+## What you can do
+
+| Command                       | What it does                                                          |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `/switch <runtime>`           | Switch which model brain is replying from now on.                    |
+| `/runtimes`                   | See what models are available — the current one is marked with `*`.  |
+| `/sessions`                   | See all your past conversations, sorted by recency.                  |
+| `/session <name>`             | Look at a past conversation's raw history.                           |
+
+`/session` accepts either a full `<user>/<session_id>` path (just copy from `/sessions` output) or just the session ID if it's the only one with that name.
+
+## Switching models mid-chat
+
+This is the one you'll use the most. Say you've been chatting with Claude Code and want to ask the next question to a cheaper model:
+
+```
+/switch gpt-4o
+```
+
+Vulcan replies "Switched to runtime: gpt-4o" and from now on, your messages go to that one. Your conversation history carries over — the new model picks up where the old one left off.
+
+This works the same in Feishu, in `curl`, in any client. From an API call it looks like this:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: default" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "/switch gpt-4o"}]
+  }'
+```
+
+## Which model is replying right now?
+
+API requests pick a runtime per request — whatever you set as `"model"` in the request body wins. Channel messages (Feishu and friends) use the current default. `/switch` changes the default. So if you `/switch` from Feishu, the next Feishu message goes to the new model; an API request that explicitly names a different model still uses the one it asked for.
+
+## Adding your own commands
+
+You can write your own slash commands — drop a file in `vulcan/gateway/commands/`, return a reply, register it in the gateway. Look at the existing commands in [the GitHub tree](https://github.com/vulcan-community/vulcan-agent/tree/main/vulcan/gateway/commands) for the pattern; it's a few lines of Python per command.

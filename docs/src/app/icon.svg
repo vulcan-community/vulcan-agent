@@ -1,0 +1,64 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1530"/>
+      <stop offset="1" stop-color="#0a0815"/>
+    </linearGradient>
+    <linearGradient id="head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9aa6b8"/>
+      <stop offset="0.5" stop-color="#5a6478"/>
+      <stop offset="1" stop-color="#2e3442"/>
+    </linearGradient>
+    <linearGradient id="handle" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a86a3d"/>
+      <stop offset="1" stop-color="#5e3a20"/>
+    </linearGradient>
+    <radialGradient id="spark" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#fff5b8"/>
+      <stop offset="0.4" stop-color="#ffb347"/>
+      <stop offset="1" stop-color="#ff4500" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ff8a3c" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ff4500" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="56" fill="url(#bg)"/>
+
+  <!-- impact glow on the anvil area -->
+  <ellipse cx="128" cy="196" rx="80" ry="22" fill="url(#glow)"/>
+
+  <!-- hammer rotated -22deg around impact point -->
+  <g transform="translate(128 158) rotate(-22)">
+    <!-- handle -->
+    <rect x="-7" y="-6" width="14" height="96" rx="4" fill="url(#handle)"/>
+    <rect x="-7" y="-6" width="14" height="96" rx="4" fill="none" stroke="#3a2010" stroke-width="1" opacity="0.5"/>
+    <!-- pommel -->
+    <rect x="-10" y="84" width="20" height="10" rx="3" fill="#3a2010"/>
+    <!-- head -->
+    <rect x="-58" y="-32" width="116" height="34" rx="5" fill="url(#head)"/>
+    <rect x="-58" y="-32" width="116" height="9" rx="5" fill="#b6c0d0" opacity="0.4"/>
+    <!-- head highlight stripe -->
+    <line x1="-46" y1="-15" x2="46" y2="-15" stroke="#1a1f2a" stroke-width="1.5" opacity="0.6"/>
+    <!-- collar where head meets handle -->
+    <rect x="-12" y="-2" width="24" height="10" rx="2" fill="#3a4250"/>
+  </g>
+
+  <!-- sparks scattered around impact point -->
+  <g>
+    <circle cx="58"  cy="196" r="6" fill="url(#spark)"/>
+    <circle cx="74"  cy="216" r="4" fill="url(#spark)"/>
+    <circle cx="92"  cy="208" r="3" fill="url(#spark)"/>
+    <circle cx="118" cy="222" r="5" fill="url(#spark)"/>
+    <circle cx="146" cy="218" r="3" fill="url(#spark)"/>
+    <circle cx="170" cy="206" r="4" fill="url(#spark)"/>
+    <circle cx="194" cy="194" r="6" fill="url(#spark)"/>
+    <circle cx="214" cy="180" r="3" fill="url(#spark)"/>
+
+    <!-- streaks -->
+    <ellipse cx="50"  cy="206" rx="2" ry="9"  fill="#ffb347" opacity="0.85" transform="rotate(-35 50 206)"/>
+    <ellipse cx="200" cy="178" rx="2" ry="10" fill="#ffb347" opacity="0.85" transform="rotate(40 200 178)"/>
+    <ellipse cx="100" cy="232" rx="1.5" ry="6" fill="#ffd76a" opacity="0.9" transform="rotate(-15 100 232)"/>
+  </g>
+</svg>

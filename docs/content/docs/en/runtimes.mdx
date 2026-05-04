@@ -1,0 +1,59 @@
+---
+title: Pick a model
+description: Choose which AI brain Vulcan uses to think.
+---
+
+A **runtime** is the model brain Vulcan uses to think. You pick one (or several) when you set up Vulcan, and you can switch between them mid-conversation. Same Vulcan, different model on the other end.
+
+## What's supported
+
+| Runtime              | Status                  | Good for                                                              |
+| -------------------- | ----------------------- | --------------------------------------------------------------------- |
+| Claude Code          | ✅                      | Full coding-agent powers — running tools, reading files, fixing code |
+| OpenAI-compatible    | ✅                      | Any chat model — ChatGPT, DeepSeek, Qwen, your own deployment        |
+| Anthropic (direct)   | coming soon             | —                                                                     |
+| Codex                | coming soon             | —                                                                     |
+| Google ADK           | coming soon             | —                                                                     |
+
+If your model speaks the OpenAI Chat Completions API, Vulcan can already talk to it — that covers most hosted services and most self-hosted setups.
+
+## When to pick which
+
+- **Claude Code** if you want Vulcan to actually *do things* — read your files, edit code, run shell commands, browse the web. It comes with the full Claude Code toolset out of the box.
+- **OpenAI-compatible** if you just want a chat model, or you already have an account/deployment somewhere and want to plug it in. Works with ChatGPT, DeepSeek, any provider with an OpenAI-style endpoint, and your own self-hosted models behind a proxy.
+
+You can have both registered at the same time and `/switch` between them whenever you want.
+
+## Picking one in `vulcan.json`
+
+Open `~/.vulcan/vulcan.json` and add a runtime under `runtimes`. Here's Claude Code:
+
+```json
+{
+  "runtimes": {
+    "claude-code": {
+      "enable": true,
+      "model": {
+        "name": "claude-sonnet-4-5",
+        "provider": "anthropic",
+        "base_url": "",
+        "api_key": ""
+      }
+    }
+  }
+}
+```
+
+Set `enable` to `false` to keep a runtime defined but parked. Restart Vulcan to pick up changes.
+
+## Credentials
+
+You have two options.
+
+**Use your existing login.** Leave `api_key` and `base_url` empty and Vulcan will reuse whatever credentials are already on your machine. For Claude Code that means your existing `claude` CLI login — if `claude` works in your terminal, Vulcan works too. No keys to copy around.
+
+**Bring your own.** Fill in `api_key` and `base_url` to point Vulcan at a specific endpoint — your company's proxy, a cheaper provider, your own deployment. When you set them, Vulcan uses them in full and ignores the local CLI's settings.
+
+## Adding a model not listed
+
+If the model speaks the OpenAI API, you usually just need to point Vulcan at it via `base_url` and `api_key` — no code required. For something more exotic, the codebase is set up so a new runtime is one Python file plus a config block. See the [`vulcan/runtime/`](https://github.com/vulcan-community/vulcan-agent/tree/main/vulcan/runtime) folder on GitHub for the existing ones as templates.
