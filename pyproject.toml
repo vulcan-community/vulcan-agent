@@ -3,6 +3,8 @@ name = "vulcan-agent"
 version = "0.1.0"
 description = "Vulcan Agent: A versatile agent framework for multi-agent collaboration and task execution."
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 
 dependencies = [
