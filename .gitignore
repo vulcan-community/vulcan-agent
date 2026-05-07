@@ -30,3 +30,7 @@ out/
 !.env.example
 .agents
 .claude
+
+# Local-dev artifacts (Claude Code / skills manager)
+AGENTS.md
+skills-lock.json
