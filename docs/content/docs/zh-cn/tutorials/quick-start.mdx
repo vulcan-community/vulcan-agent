@@ -1,0 +1,168 @@
+---
+title: 快速上手
+description: 从零跑通一次对话，再中途把 agent runtime 切了。
+---
+
+这个教程会带你装好 Vulcan、配一个 agent runtime、通过 OpenAI 兼容 HTTP API 发第一条消息、看一眼 session 流水，然后 —— 也是最关键的一步 —— 开第二个 runtime，在同一段对话里中途切过去，上下文不丢。
+
+大概十分钟。按顺序来。
+
+## 1. 前置条件
+
+需要：
+
+- Python **3.12+**
+- 装好 [`uv`](https://docs.astral.sh/uv/)
+- 下面任选其一：
+  - `claude` CLI 已登录（用 `claude-code` runtime）
+  - 一个 OpenAI 兼容的 API key 和 base URL（用 `base-openai`）
+  - `codex` CLI 已登录（用 `codex` runtime）
+
+挑你已经有凭据的那个。下面的步骤默认走 `claude-code`，第二个 runtime 用 `base-openai` —— 你可以自己替换。
+
+## 2. 安装
+
+```bash
+git clone https://github.com/vulcan-community/vulcan-agent.git
+cd vulcan-agent
+uv sync --extra claude-code
+```
+
+extra 对应 runtime 和 channel：
+
+- `claude-code` —— Claude Code runtime（装 `claude-agent-sdk`）
+- `codex` —— Codex runtime（装 `openai-codex-sdk`）
+- `feishu` —— 飞书 channel（装 `lark-oapi`）
+
+一次装多个就逗号分隔：`uv sync --extra claude-code,codex`。
+
+## 3. 写一份最小配置
+
+Vulcan 读 `~/.vulcan/vulcan.json`。首次启动文件不存在会自动从模板拷一份，这里我们显式写一份，看看结构：
+
+```json
+{
+  "version": "0.1",
+  "runtimes": {
+    "claude-code": {
+      "enable": true,
+      "model": {
+        "model": "claude-sonnet-4-5",
+        "base_url": "",
+        "api_key": ""
+      }
+    }
+  },
+  "channels": {}
+}
+```
+
+`base_url` 和 `api_key` 留空，runtime 会走本地凭据链 —— `claude-code` 就是用你 `claude` CLI 的登录态。
+
+## 4. 启动 gateway
+
+存成 `run.py`：
+
+```python
+from pathlib import Path
+
+from vulcan.gateway.gateway import Gateway
+
+Gateway(home_dir=Path("~/.vulcan").expanduser()).start()
+```
+
+跑起来：
+
+```bash
+uv run python run.py
+```
+
+Gateway 监听 `http://0.0.0.0:4000`，讲的是 OpenAI Chat Completions API。
+
+## 5. 发第一条消息
+
+开一个新终端，`curl` 一下：
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: default" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "你好，你是谁？"}]
+  }'
+```
+
+会拿到一个标准 `ChatCompletion` JSON，回复在 `choices[0].message.content`。两点要注意：
+
+- `X-Session-Id: default` —— 随便什么字符串，只要下次复用就行。流水落在 `~/.vulcan/sessions/gateway/default.jsonl`。
+- `"model": "claude-code"` —— 这是 runtime 名字，不是模型名。模型名在 `claude-code` *里面*，配置里写了。
+
+下一轮继续用同一个 session id，assistant 就能看到上一轮。
+
+## 6. 看 session
+
+Vulcan 把 slash command 当成一条合成的 user 消息，发法和普通消息一样：
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: default" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "/sessions"}]
+  }'
+```
+
+会列出 Vulcan 知道的所有 session。`/session default` 显示当前 session 的流水。`/help` 列全部 command。
+
+## 7. 关键一招 —— 对话中途切 agent runtime
+
+停掉 gateway（`Ctrl+C`）。往 `~/.vulcan/vulcan.json` 里加第二个 runtime：
+
+```json
+{
+  "version": "0.1",
+  "runtimes": {
+    "claude-code": {
+      "enable": true,
+      "model": {
+        "model": "claude-sonnet-4-5",
+        "base_url": "",
+        "api_key": ""
+      }
+    },
+    "base-openai": {
+      "enable": true,
+      "model": {
+        "model": "gpt-4o-mini",
+        "base_url": "https://api.openai.com/v1",
+        "api_key": "sk-..."
+      }
+    }
+  },
+  "channels": {}
+}
+```
+
+重新 `uv run python run.py`，然后在同一个 `default` session 上发：
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: default" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "/switch base-openai"}]
+  }'
+```
+
+从下一轮开始，同一段对话跑在 `base-openai` 上 —— 纯 Chat Completions、工具面不同、推理回路也不同。JSONL 流水还是那一份，继续往下长。想切回去就 `/switch claude-code`。
+
+这就是 Vulcan 最不一样的地方：不是换模型，而是换整个 agent runtime，在同一个 session 上。
+
+## 接下来
+
+- [操作手册](/docs/how-to/connect-feishu) —— 接飞书、加 command、上反向代理。
+- [参考](/docs/reference/commands) —— 全部 slash command、全部配置字段。
+- [设计与思路](/docs/explanation/agent-runtimes) —— 为什么 control plane 是 slash command、为什么 session 是 JSONL、为什么 runtime 是正确的边界。

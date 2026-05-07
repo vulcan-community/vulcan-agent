@@ -1,13 +1,11 @@
 import json
-import uuid
 from pathlib import Path
-from typing import List
 
 from openai.types.conversations.message import Message
-from openai.types.responses.response_input_text import ResponseInputText
 
 from ..types.session import Session, SessionItem
 from ..utils.logger import get_logger
+from ..utils.messages import user_message
 from .base_session_manager import BaseSessionManager
 
 logger = get_logger(__name__)
@@ -18,16 +16,25 @@ class LocalSessionManager(BaseSessionManager):
         self.session_dir = session_dir
         super().__init__()
 
-    def create_session(self, channel_id: str, session_id: str) -> None:
+    def create_session(
+        self, channel_id: str, session_id: str, runtime_name: str
+    ) -> None:
+        """Idempotently ensure a session exists and is bound to a runtime.
+
+        Creates the channel directory, touches the `.jsonl` transcript (if
+        missing), and writes the `.meta.json` sidecar with `runtime_name`.
+        Safe to call every turn — existing transcripts are not touched,
+        and re-binding is as cheap as overwriting the meta file.
+        """
         channel_path = self.session_dir / channel_id
-        if not channel_path.exists():
-            channel_path.mkdir(parents=True, exist_ok=True)
+        channel_path.mkdir(parents=True, exist_ok=True)
 
         session_file = channel_path / f"{session_id}.jsonl"
-        if session_file.exists():
-            logger.warning(f"Session {session_file} exist, skip creation.")
-        else:
+        if not session_file.exists():
             session_file.touch()
+            logger.info(f"created session: {session_file}")
+
+        self.set_session_runtime(channel_id, session_id, runtime_name)
 
     def append_to_session(
         self,
@@ -36,12 +43,10 @@ class LocalSessionManager(BaseSessionManager):
         item: SessionItem,
     ) -> None:
         session_file = self.session_dir / channel_id / f"{session_id}.jsonl"
-        if not session_file.exists():
-            logger.warning(
-                f"Session {session_file} not existing, create it first."
-            )
-            self.create_session(channel_id=channel_id, session_id=session_id)
-
+        assert session_file.exists(), (
+            f"session {session_file} must be created via create_session()"
+            " before appending"
+        )
         with session_file.open("a") as f:
             f.write(item.model_dump_json() + "\n")
 
@@ -58,7 +63,10 @@ class LocalSessionManager(BaseSessionManager):
                 item = json.loads(line)
                 items.append(item)
 
-        return Session(items=items)
+        return Session(
+            runtime_name=self.get_session_runtime(channel_id, session_id),
+            items=items,
+        )
 
     def delete_session(self, channel_id: str, session_id: str) -> None:
         session_file = self.session_dir / channel_id / f"{session_id}.jsonl"
@@ -68,8 +76,11 @@ class LocalSessionManager(BaseSessionManager):
             )
 
         session_file.unlink()
+        meta_file = self._meta_path(channel_id, session_id)
+        if meta_file.exists():
+            meta_file.unlink()
 
-    def get_session_ids(self, channel_id: str) -> List[str]:
+    def get_session_ids(self, channel_id: str) -> list[str]:
         session_ids = []
         channel_path = self.session_dir / channel_id
         if channel_path.exists():
@@ -102,10 +113,32 @@ class LocalSessionManager(BaseSessionManager):
             if lines
             else ""
         )
-        return Message(
-            id=str(uuid.uuid4()),
-            type="message",
-            role="user",
-            status="completed",
-            content=[ResponseInputText(type="input_text", text=text)],
-        )
+        return user_message(text)
+
+    def get_session_runtime(
+        self, channel_id: str, session_id: str
+    ) -> str | None:
+        """Return the runtime name bound to this session, or None if the
+        sidecar meta file is missing or malformed."""
+        meta_file = self._meta_path(channel_id, session_id)
+        if not meta_file.exists():
+            return None
+        try:
+            data = json.loads(meta_file.read_text())
+        except json.JSONDecodeError:
+            logger.warning(f"malformed session meta: {meta_file}")
+            return None
+        name = data.get("runtime_name")
+        return name if isinstance(name, str) and name else None
+
+    def set_session_runtime(
+        self, channel_id: str, session_id: str, runtime_name: str
+    ) -> None:
+        """Persist the runtime binding for this session to its sidecar
+        meta file. Creates the channel directory on demand."""
+        meta_file = self._meta_path(channel_id, session_id)
+        meta_file.parent.mkdir(parents=True, exist_ok=True)
+        meta_file.write_text(json.dumps({"runtime_name": runtime_name}))
+
+    def _meta_path(self, channel_id: str, session_id: str) -> Path:
+        return self.session_dir / channel_id / f"{session_id}.meta.json"

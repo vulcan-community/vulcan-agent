@@ -1,0 +1,64 @@
+---
+title: Connect Feishu
+description: Make Vulcan reply inside a Feishu (Lark) chat.
+---
+
+You want Vulcan to answer messages sent to a Feishu bot. Four steps.
+
+## 1. Create a custom bot app
+
+In the [Feishu Open Platform](https://open.feishu.cn/app), create a new custom app. Enable the bot capability, grant at minimum the `im:message` and `im:message:send_as_bot` permissions, and copy its `app_id` (looks like `cli_...`) and `app_secret`.
+
+No webhook URL is needed — the channel opens a long-connection WebSocket from Vulcan out to Feishu.
+
+## 2. Install the optional extra
+
+```bash
+uv sync --extra feishu
+```
+
+This pulls in `lark-oapi`, which the channel uses for both the WebSocket client and the CardKit API.
+
+## 3. Add the channel to `vulcan.json`
+
+Open `~/.vulcan/vulcan.json` and add a `feishu` block under `channels`:
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "enable": true,
+      "config": {
+        "app_id": "cli_...",
+        "app_secret": "..."
+      }
+    }
+  }
+}
+```
+
+The channel has no runtime field of its own — runtime selection is per-session. A fresh Feishu session uses `config.default_runtime` (top-level in `vulcan.json`), and from inside any chat you can rebind just that session with `/switch <name>`.
+
+## 4. Restart and @ the bot
+
+Restart Vulcan. The gateway boots the channel, spawns a daemon thread for the WebSocket, and logs `feishu channel 'feishu' listening`.
+
+Add the bot to a group, @ it, and send a message. Vulcan:
+
+- drops an emoji reaction on your message as an acknowledgement,
+- opens one CardKit card and updates it live as the runtime streams,
+- renders assistant text inline, reasoning as a blockquote, and each tool call as a collapsible panel with the tool name, args, and result.
+
+Everything from a single user message lands in one card.
+
+## Troubleshooting
+
+**Nothing happens when I @ the bot.** Check the gateway log for `feishu channel '...' listening`. If the line is missing, the `feishu` extra isn't installed or `enable` is false.
+
+**The card appears but the body stays empty.** The channel booted but the runtime can't answer. Agent runtimes have their own prerequisites:
+
+- `claude-code` needs the `claude` CLI logged in, or an `api_key` / `base_url` set under `runtimes.claude-code.model` — see the [runtime reference](/docs/reference/runtimes).
+- `codex` needs `codex login` run once (or `Codex.install(...)` from Python) to provision the CLI and auth.
+- `base-openai` needs `api_key` and `base_url` filled in.
+
+Run `/runtime` from any channel to see which runtimes are `enabled` vs. `uninstalled` vs. `disabled`.

@@ -1,0 +1,168 @@
+---
+title: Quick start
+description: Zero to a working conversation, then switch agent runtime mid-stream.
+---
+
+In this tutorial you will install Vulcan, configure one agent runtime, talk to it over the OpenAI-compatible HTTP API, inspect the session transcript, and then — the payoff — enable a second runtime and hop to it mid-conversation without losing context.
+
+About ten minutes. Follow the steps in order.
+
+## 1. Prerequisites
+
+You need:
+
+- Python **3.12+**
+- [`uv`](https://docs.astral.sh/uv/) installed
+- At least one of:
+  - The `claude` CLI logged in (for the `claude-code` runtime), or
+  - An OpenAI-compatible API key and base URL (for `base-openai`), or
+  - The `codex` CLI logged in (for the `codex` runtime)
+
+Pick whichever one you already have credentials for. The rest of this tutorial uses `claude-code` as the primary example and `base-openai` as the second runtime — substitute freely.
+
+## 2. Install
+
+```bash
+git clone https://github.com/vulcan-community/vulcan-agent.git
+cd vulcan-agent
+uv sync --extra claude-code
+```
+
+Extras map to runtimes and channels:
+
+- `claude-code` — Claude Code runtime (pulls `claude-agent-sdk`)
+- `codex` — Codex runtime (pulls `openai-codex-sdk`)
+- `feishu` — Feishu channel (pulls `lark-oapi`)
+
+Install several at once with a comma-separated list: `uv sync --extra claude-code,codex`.
+
+## 3. Write a minimal config
+
+Vulcan reads `~/.vulcan/vulcan.json`. On first start it copies the template if the file is missing, but let's write it explicitly so you can see the shape:
+
+```json
+{
+  "version": "0.1",
+  "runtimes": {
+    "claude-code": {
+      "enable": true,
+      "model": {
+        "model": "claude-sonnet-4-5",
+        "base_url": "",
+        "api_key": ""
+      }
+    }
+  },
+  "channels": {}
+}
+```
+
+Leaving `base_url` and `api_key` empty makes the runtime fall back to the local credential chain — for `claude-code` that means your `claude` CLI login.
+
+## 4. Start the gateway
+
+Save this as `run.py`:
+
+```python
+from pathlib import Path
+
+from vulcan.gateway.gateway import Gateway
+
+Gateway(home_dir=Path("~/.vulcan").expanduser()).start()
+```
+
+Then run it:
+
+```bash
+uv run python run.py
+```
+
+The gateway listens on `http://0.0.0.0:4000` and speaks the OpenAI Chat Completions API.
+
+## 5. Send the first message
+
+Open a second terminal and `curl` the endpoint:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: default" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "hello, who are you?"}]
+  }'
+```
+
+You will get back a regular `ChatCompletion` JSON object with the assistant's reply in `choices[0].message.content`. Two things to note:
+
+- `X-Session-Id: default` — any string, as long as you reuse it next turn. Vulcan stores the transcript at `~/.vulcan/sessions/gateway/default.jsonl`.
+- `"model": "claude-code"` — this is the runtime name, not a model name. The model *inside* `claude-code` is whatever you set in config.
+
+Send a follow-up using the same session id and the assistant will see the prior turn.
+
+## 6. Inspect the session
+
+Vulcan treats slash commands as synthetic user messages. Try them the same way you send a regular message:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: default" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "/sessions"}]
+  }'
+```
+
+You'll get a list of every session Vulcan knows about. `/session default` shows the current session's transcript. `/help` lists every command.
+
+## 7. The payoff — switch agent runtime mid-conversation
+
+Stop the gateway (`Ctrl+C`). Add a second runtime to `~/.vulcan/vulcan.json`:
+
+```json
+{
+  "version": "0.1",
+  "runtimes": {
+    "claude-code": {
+      "enable": true,
+      "model": {
+        "model": "claude-sonnet-4-5",
+        "base_url": "",
+        "api_key": ""
+      }
+    },
+    "base-openai": {
+      "enable": true,
+      "model": {
+        "model": "gpt-4o-mini",
+        "base_url": "https://api.openai.com/v1",
+        "api_key": "sk-..."
+      }
+    }
+  },
+  "channels": {}
+}
+```
+
+Restart `uv run python run.py`, then, on the same `default` session, send:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: default" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "/switch base-openai"}]
+  }'
+```
+
+From the next turn on, the same conversation runs on `base-openai` — plain Chat Completions, different tool surface, different reasoning loop. The JSONL transcript keeps growing in one file. Switch back with `/switch claude-code`.
+
+That is the distinguishing move: not a model swap, but an agent-runtime swap, on the same session.
+
+## Where next
+
+- [Recipes](/docs/how-to/connect-feishu) — connect Feishu, add a command, run behind a reverse proxy.
+- [Reference](/docs/reference/commands) — every slash command, every config field.
+- [Design & rationale](/docs/explanation/agent-runtimes) — why the control plane is a slash command, why sessions are JSONL, why runtimes are the right boundary.

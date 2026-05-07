@@ -1,29 +1,20 @@
+from .base_openai.base_openai import BaseOpenAIRuntime
 from .base_runtime import BaseRuntime
+from .claude_code.claude_code import ClaudeCodeRuntime
+from .codex.codex import CodexRuntime
 
-KNOWN_RUNTIMES: tuple[str, ...] = ("base-openai", "claude-code")
-
-
-def list_runtime_names() -> list[str]:
-    return list(KNOWN_RUNTIMES)
+# Name → concrete BaseRuntime subclass. Modules defer their optional SDK
+# imports into method bodies, so this top-level import works even when
+# `claude-agent-sdk` / `openai-codex-sdk` aren't installed; each class's
+# `is_installed()` reports whether its dependencies are actually present.
+KNOWN_RUNTIMES: dict[str, type[BaseRuntime]] = {
+    "base-openai": BaseOpenAIRuntime,
+    "claude-code": ClaudeCodeRuntime,
+    "codex": CodexRuntime,
+}
 
 
 def get_runtime_cls(name: str) -> type[BaseRuntime]:
-    if name == "base-openai":
-        from .base_openai.base_openai import BaseOpenAIRuntime
-
-        return BaseOpenAIRuntime
-    if name == "claude-code":
-        from .claude_code.claude_code import ClaudeCodeRuntime
-
-        return ClaudeCodeRuntime
-    raise ValueError(f"Unsupported runtime: {name}")
-
-
-def is_runtime_installed(name: str) -> bool:
-    """Attempt to import the runtime class. Returns False if the optional
-    dependency isn't installed (ImportError) or the name isn't known."""
-    try:
-        get_runtime_cls(name)
-    except (ImportError, ValueError):
-        return False
-    return True
+    if name not in KNOWN_RUNTIMES:
+        raise ValueError(f"Unsupported runtime: {name}")
+    return KNOWN_RUNTIMES[name]

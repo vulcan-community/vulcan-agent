@@ -1,0 +1,98 @@
+---
+title: 写一个 slash command
+description: 加一个 `/foo` 命令,任意 channel 里都能用。
+---
+
+你想让 `/uptime`(或者随便什么)在 Vulcan 的任何聊天里都能用——飞书、curl、Python SDK 都行。Slash command 在 gateway 里比 runtime 更早被匹配掉,所以代价很小:一个类、注册一行。
+
+## 1. 建包
+
+在 `vulcan/gateway/commands/uptime/` 下放两个文件:
+
+```
+vulcan/gateway/commands/uptime/
+├── __init__.py
+└── uptime.py
+```
+
+`__init__.py` 空着就行——注册走 gateway 里直接 import 类的方式(第 3 步)。
+
+## 2. 继承 `BaseCommand`
+
+```python
+# vulcan/gateway/commands/uptime/uptime.py
+import time
+from typing import TYPE_CHECKING
+
+from openai.types.chat import ChatCompletion
+
+from ..base_command import BaseCommand
+
+if TYPE_CHECKING:
+    from ...gateway import Gateway
+
+
+_STARTED_AT = time.monotonic()
+
+
+class UptimeCommand(BaseCommand):
+    def __init__(self, gateway: "Gateway") -> None:
+        super().__init__(
+            command="uptime",
+            description="Show how long the gateway has been running: /uptime",
+        )
+        self._gateway = gateway
+
+    def exec(self, args: list[str]) -> ChatCompletion:
+        seconds = int(time.monotonic() - _STARTED_AT)
+        return self._reply(f"up for {seconds}s")
+```
+
+契约:
+
+- `command`——`/` 后面那个词。`match_command` 对的是空格切分后第一个 token,所以 `/uptime` 和 `/uptime foo` 都会走到这儿。
+- `description`——一行话,`/help` 会用。把用法写上。
+- `exec(args)`——`args` 是命令 token 之后按空格切出来的列表。返回一个 `ChatCompletion`。`self._reply(str)` 把字符串包成每个命令都在用的那种 `vulcan-system` completion 形状。
+
+## 3. 在 gateway 里注册
+
+打开 `vulcan/gateway/gateway.py`,把你的类加到 `_register_commands` 的 tuple 里:
+
+```python
+def _register_commands(self) -> None:
+    from .commands.help.help import HelpCommand
+    from .commands.runtime.runtime import RuntimeCommand
+    from .commands.session.session import SessionCommand
+    from .commands.sessions.sessions import SessionsCommand
+    from .commands.switch.switch import SwitchCommand
+    from .commands.uptime.uptime import UptimeCommand
+    from .commands.version.version import VersionCommand
+
+    for cls in (
+        SwitchCommand,
+        SessionsCommand,
+        SessionCommand,
+        RuntimeCommand,
+        VersionCommand,
+        UptimeCommand,
+        HelpCommand,
+    ):
+        cmd = cls(gateway=self)
+        self.command_manager.register_command(cmd)
+```
+
+`/help` 靠 `CommandManager.list_commands()` 自动列出,你新加的这条会自己冒出来——不用改 `/help`。
+
+## 4. 重启,试一下
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: default" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "/uptime"}]
+  }'
+```
+
+Slash command 在 `Gateway.invoke_stream` 里比 session 落盘和 runtime 派发都更早被匹配掉,所以它们既不烧 runtime 的 token 也不会进 session 日志。飞书里也一样用,直接在聊天里发 `/uptime` 就行。

@@ -1,0 +1,103 @@
+---
+title: Channels
+description: BaseChannel 接口与所有内置 channel。
+---
+
+**Channel** 是接收外部平台用户消息并转发到 `Gateway.invoke_stream` 的前端传输层。Gateway 构造时根据 `GatewayConfig.channels` 注册 channel；`enable: false` 的条目会被跳过。
+
+## `BaseChannel`
+
+抽象基类位于 `vulcan.gateway.channels.base_channel`。
+
+### 构造函数
+
+```python
+BaseChannel(
+    name: str,
+    gateway: "Gateway",
+    description: str = "",
+    config: dict = {},
+)
+```
+
+| 参数          | 说明                                                         |
+| ------------- | ------------------------------------------------------------ |
+| `name`        | Channel 实例名（作为 gateway 调用中的 `channel_id`）。       |
+| `gateway`     | 所属 `Gateway` 引用。                                        |
+| `description` | 自由描述（基类不使用）。                                     |
+| `config`      | `vulcan.json` 中 channel 特定 `config` 字典。                |
+
+Channel 不挑运行时。运行时选择是按 session 的 —— gateway 从 session 的 sidecar meta 解析（由 `/switch`、API middleware 或新 session 的 `config.default_runtime` 回落写入）。
+
+### 转发方法
+
+两者均为 `@final`，直接委托给 gateway。以 `self.name` 作为 `channel_id`。
+
+```python
+async def invoke(
+    self,
+    session_id: str,
+    user_message: Message,
+) -> ChatCompletion: ...
+
+async def invoke_stream(
+    self,
+    session_id: str,
+    user_message: Message,
+) -> AsyncIterator[SessionItem]: ...
+```
+
+在对话内发 `/switch <name>` 只重绑当前 session。
+
+## 注册表
+
+| 名称     | 类              | 可选 extra |
+| -------- | --------------- | ---------- |
+| `feishu` | `FeishuChannel` | `feishu`   |
+
+解析在 `vulcan.gateway.channels.get_channel_cls(name)`。未知名称抛出 `ValueError`。
+
+## `feishu`
+
+基于 Feishu（飞书/Lark）长连接 WebSocket 事件订阅的 `BaseChannel` 实现。无需公网 webhook URL。
+
+### 配置
+
+位于 `channels.feishu.config` 下的字段：
+
+| 字段         | 类型 | 必填 | 说明                                 |
+| ------------ | ---- | ---- | ------------------------------------ |
+| `app_id`     | str  | 是   | Feishu app ID（形如 `cli_...`）。    |
+| `app_secret` | str  | 是   | Feishu app secret。                  |
+
+### 行为
+
+- 构造时建立 `lark.Client`，并在 daemon 线程中启动 `ws.start()`。
+- 入站 `P2ImMessageReceiveV1` 事件在当前事件循环上调度 `handle_event` 任务。
+- `reaction_created` / `reaction_deleted` 等反应事件被吞掉，避免 `send_reaction` 触发的回声。
+- 每轮会话：
+  1. `send_reaction` —— 向源消息回复 emoji 确认。
+  2. `CardSession.start()` —— 创建 CardKit 卡片作为回复。
+  3. `self.invoke_stream(session_id=<chat_id>, user_message=...)` —— 由 gateway 分派到运行时。
+  4. 按 `SessionItem` 类型渐进渲染（见下表）。
+  5. `CardSession.finish()` —— 清除流式指示。
+
+### SessionItem 渲染
+
+| SessionItem                            | Feishu 渲染                                                         |
+| -------------------------------------- | ------------------------------------------------------------------- |
+| `Message`（assistant，文本片段）       | 累计至同一个 streaming markdown 元素。                              |
+| `ResponseReasoningItem`                | 新 markdown 元素，以 `>` 引用块渲染。                               |
+| `ResponseFunctionToolCallItem`         | 新 `collapsible_panel`，标题为工具名，正文为参数。                  |
+| `ResponseFunctionToolCallOutputItem`   | 按 `call_id` 配对的同一 panel，内部 markdown 追加 result 段落；`is_error = status == "incomplete"`。 |
+
+### `session_id` 映射
+
+`session_id` 取入站消息的 Feishu `chat_id` —— 一个 Feishu 会话对应一个 Vulcan session。
+
+## 计划中的 channel
+
+| 名称      | 状态        |
+| --------- | ----------- |
+| `slack`   | coming soon |
+| `discord` | coming soon |

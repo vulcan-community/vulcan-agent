@@ -1,0 +1,154 @@
+---
+title: vulcan.json schema
+description: The gateway configuration file — every field, type, and default.
+---
+
+`vulcan.json` lives at `<home_dir>/vulcan.json` (default `~/.vulcan/vulcan.json`). It is loaded into `GatewayConfig` (pydantic) at gateway construction via `GatewayConfig.model_validate_json`.
+
+## Top level — `GatewayConfig`
+
+| Field             | Type                           | Default            | Description                                  |
+| ----------------- | ------------------------------ | ------------------ | -------------------------------------------- |
+| `version`         | `str`                          | `vulcan.VERSION`   | Schema/version tag. Informational.           |
+| `default_runtime` | `str`                          | `"base-openai"`    | Fallback runtime for a session that has no binding yet. Must match a key in `KNOWN_RUNTIMES`. |
+| `runtimes`        | `dict[str, RuntimeConfig]`     | `{}`               | Per-runtime configuration keyed by registry name. |
+| `channels`        | `dict[str, ChannelConfig]`     | `{}`               | Per-channel configuration keyed by channel name. |
+
+All pydantic models in this schema have `extra="forbid"` — unknown keys cause validation failure.
+
+## Per-session runtime binding
+
+Runtime selection is **per-session**, not global or per-channel. Each session's binding lives in a sidecar `<session_id>.meta.json` next to the JSONL transcript:
+
+```json
+{"runtime_name": "claude-code"}
+```
+
+Three things write this file:
+
+- `/switch <name>` — explicit rebind from the current session.
+- The API middleware — when a request's `"model"` field is non-empty, it's persisted before the gateway dispatches.
+- `Gateway.invoke_stream` — on a fresh session with no prior binding, it writes `config.default_runtime`.
+
+`Session.runtime_name` (pydantic) carries the binding in-memory; it is `None` if the meta file is missing.
+
+## `RuntimeConfig`
+
+Keyed under `runtimes.<name>` where `<name>` is one of `base-openai`, `claude-code`, `codex` (see [Runtimes](./runtimes)). Names not in `KNOWN_RUNTIMES` are ignored at registration.
+
+| Field    | Type          | Default               | Description                      |
+| -------- | ------------- | --------------------- | -------------------------------- |
+| `enable` | `bool`        | `false`               | Gate that marks the runtime as `enabled`. If `false`, the status is `disabled`. |
+| `model`  | `ModelConfig` | `ModelConfig()`       | Model parameters.                |
+
+`extra="forbid"`.
+
+## `ModelConfig`
+
+| Field      | Alias   | Type  | Default                                                        | Description                              |
+| ---------- | ------- | ----- | -------------------------------------------------------------- | ---------------------------------------- |
+| `name`     | `model` | `str` | `""`                                                           | Model identifier (e.g. `claude-sonnet-4-5`). |
+| `provider` | —       | `str` | `"openai"`                                                     | Model provider.                          |
+| `base_url` | —       | `str` | `"https://ark.cn-beijing.volces.com/api/v3/chat/completions"`  | Model API base URL.                      |
+| `api_key`  | —       | `str` | `""`                                                           | API key.                                 |
+
+`model_config = ConfigDict(populate_by_name=True, extra="forbid")`. The `name` field is aliased to `model`, so both `"model": "..."` and `"name": "..."` parse; the shipped template uses `"model"`.
+
+Empty-string `api_key` / `base_url` are treated as unset and fall back to the SDK's own resolution (environment, local CLI auth, etc.).
+
+## `ChannelConfig`
+
+Keyed under `channels.<name>`. `<name>` is resolved by `get_channel_cls(name)` — unknown names raise.
+
+| Field     | Type    | Default | Description                                                   |
+| --------- | ------- | ------- | ------------------------------------------------------------- |
+| `enable`  | `bool`  | `false` | If `false`, the channel is skipped at registration.           |
+| `config`  | `dict`  | `{}`    | Channel-specific configuration. See individual channels for fields. |
+
+`extra="forbid"`. Channels do not pick a runtime — every session carries its own binding (see above).
+
+## Shipped template
+
+From `vulcan/template/vulcan.json` — copied into `home_dir` on first gateway startup:
+
+```json
+{
+    "version": "0.1",
+    "default_runtime": "base-openai",
+    "runtimes": {
+        "base-openai": {
+            "enable": false,
+            "model": {
+                "name": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        },
+        "claude-code": {
+            "enable": false,
+            "model": {
+                "name": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        },
+        "codex": {
+            "enable": false,
+            "model": {
+                "name": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        }
+    },
+    "channels": {}
+}
+```
+
+## Fully configured example
+
+```json
+{
+    "version": "0.1",
+    "default_runtime": "claude-code",
+    "runtimes": {
+        "base-openai": {
+            "enable": true,
+            "model": {
+                "name": "gpt-4o",
+                "provider": "openai",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "sk-..."
+            }
+        },
+        "claude-code": {
+            "enable": true,
+            "model": {
+                "name": "claude-sonnet-4-5",
+                "provider": "anthropic",
+                "base_url": "",
+                "api_key": ""
+            }
+        },
+        "codex": {
+            "enable": false,
+            "model": {
+                "name": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        }
+    },
+    "channels": {
+        "feishu": {
+            "enable": true,
+            "config": {
+                "app_id": "cli_...",
+                "app_secret": "..."
+            }
+        }
+    }
+}
+```
+
+In this example, `claude-code` is the fallback for any session with no prior binding. `base-openai` is also `enabled` and available via `/switch base-openai` or the API's `"model": "base-openai"`. `codex` reports status `disabled`.

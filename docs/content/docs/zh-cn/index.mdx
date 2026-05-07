@@ -1,22 +1,30 @@
 ---
 title: 介绍
-description: 一套 OpenAI 兼容 API,背后挂可插拔的 Agent 运行时。
+description: Vulcan 是可插拔 agent runtime 的 dispatch 层 —— 一个 session，一套 API，任你换 agent 栈。
 ---
 
-**可插拔运行时,统一 API。**
+Vulcan 是**可插拔 agent runtime** 的 dispatch 层。这里的 "agent runtime" 不是单指一个 LLM，而是整套编排栈 —— 模型、工具面、沙箱、推理回路都包在里面。Claude Code 会读文件、改代码、跑 shell、讲 MCP；OpenAI Codex 做的是同一类活；Google ADK 自带一套 orchestrator；base OpenAI 就是纯 Chat Completions，没有内建工具。Vulcan 把它们全部挂在一套 OpenAI 兼容 API 后面，每个 session 留一份 JSONL 流水，一套 slash command 构成 control plane。同一段对话可以通过 `/switch` 中途切到另一个 runtime。
 
-Vulcan Agent 位于客户端(OpenWebUI、`openai` SDK、`curl`、飞书等)和 Agent 运行时(Claude Code、OpenAI 兼容、Codex、Google ADK 等)之间。你在一份配置里挂运行时和 channel,Vulcan 负责会话流水和每一轮的分发。
+## Vulcan 不是什么
 
-编排有两个入口。`Gateway.invoke()` 把所有 yield 的 `SessionItem` 收齐,返回一条 `ChatCompletion` —— API 服务用这条路。`Gateway.invoke_stream()` 在运行时产出每个 `SessionItem` 时直接 yield —— channel 用这条路做渐进式渲染(比如飞书 CardKit 的渐进式卡片,文字、思考、工具调用边产出边落地)。
+不是 model router。LiteLLM、OpenRouter 这类工具在同一个 chat-completion 接口下切换底层模型权重 —— 工具面是同一套（空的），换的是权重。Vulcan 往上高一层：切的是整个 agent *栈* —— 工具面不同、沙箱不同、推理回路不同、persona 注入钩子也不同。也不是新的聊天 UI，也不是 prompt 库 —— 它讲的是 OpenAI HTTP API，你现有的客户端（OpenWebUI、`openai` SDK、`curl`、飞书）直接能用。
 
-每个运行时只实现一个方法:`BaseRuntime.invoke(ctx) -> AsyncIterator[SessionItem]`。每个会话是一份 OpenAI `ConversationItem` 的 JSONL 流水。流水按来源隔离 —— API 请求落在 `channel_id="gateway"`,channel 消息落在 channel 的名字下。换运行时,流水继续。
+## 支持的 agent runtime
+
+| Runtime       | 状态     | 是什么                                                     |
+| ------------- | -------- | ---------------------------------------------------------- |
+| `claude-code` | ✅       | Anthropic Claude Code agent —— 文件、shell、MCP、thinking。 |
+| `codex`       | ✅       | OpenAI Codex CLI —— 文件、shell、MCP、web 搜索。            |
+| `base-openai` | ✅       | 任意 OpenAI 兼容 Chat Completions 端点，没有工具。          |
+| `google-adk`  | planned  | Google Agent Development Kit。                             |
+
+每个 runtime 是一个可选 extra（`uv sync --extra claude-code`、`--extra codex`）。按需装。
 
 ## 接下来
 
 <Cards>
-  <Card title="架构" href="/docs/architecture" />
-  <Card title="快速开始" href="/docs/quick-start" />
-  <Card title="运行时" href="/docs/runtimes" />
-  <Card title="通信渠道" href="/docs/channels" />
-  <Card title="命令" href="/docs/commands" />
+  <Card title="快速上手" href="/docs/tutorials/quick-start" description="五分钟把对话跑起来，再演示中途切 agent runtime。" />
+  <Card title="操作手册" href="/docs/how-to/connect-feishu" description="任务导向的 how-to —— 接 channel、换模型、加命令。" />
+  <Card title="参考" href="/docs/reference/commands" description="配置 schema、slash command、CLI、runtime 与 channel 目录。" />
+  <Card title="设计与思路" href="/docs/explanation/agent-runtimes" description="为什么做可插拔 agent runtime 而不是 model routing —— session 和 control plane 是怎么拼起来的。" />
 </Cards>

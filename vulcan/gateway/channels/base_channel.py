@@ -1,14 +1,13 @@
 from abc import ABC
-from typing import AsyncIterator, final
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, final
 
 from openai.types.chat import ChatCompletion
 from openai.types.conversations.message import Message
-from typing_extensions import TYPE_CHECKING
 
 from ...types.session import SessionItem
 
 if TYPE_CHECKING:
-    from ...runtime.base_runtime import BaseRuntime
     from ..gateway import Gateway
 
 
@@ -17,7 +16,6 @@ class BaseChannel(ABC):
         self,
         name: str,
         gateway: "Gateway",
-        default_runtime: "BaseRuntime",
         description: str = "",
         config: dict = {},
     ) -> None:
@@ -25,8 +23,6 @@ class BaseChannel(ABC):
         self.config = config
         self.gateway = gateway
         self.description = description
-
-        self.runtime = default_runtime
 
     @final
     async def invoke(

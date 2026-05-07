@@ -1,11 +1,7 @@
-import time
-import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from openai.types.chat import ChatCompletion
-from openai.types.chat.chat_completion import Choice
-from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
 from ..base_command import BaseCommand
 
@@ -21,7 +17,9 @@ class SessionsCommand(BaseCommand):
         )
         self._gateway = gateway
 
-    def exec(self, args: list[str]) -> ChatCompletion:
+    def exec(
+        self, args: list[str], channel_id: str, session_id: str
+    ) -> ChatCompletion:
         session_dir = self._gateway.session_manager.session_dir
         rows: list[tuple[float, str]] = []
         if session_dir.exists():
@@ -38,20 +36,4 @@ class SessionsCommand(BaseCommand):
         text = "Sessions:\n" + (
             "\n".join(r for _, r in rows) if rows else "  (none)"
         )
-
-        return ChatCompletion(
-            id=str(uuid.uuid4()),
-            object="chat.completion",
-            created=int(time.time()),
-            model="vulcan-system",
-            choices=[
-                Choice(
-                    index=0,
-                    finish_reason="stop",
-                    message=ChatCompletionMessage(
-                        role="assistant",
-                        content=text,
-                    ),
-                )
-            ],
-        )
+        return self._reply(text)

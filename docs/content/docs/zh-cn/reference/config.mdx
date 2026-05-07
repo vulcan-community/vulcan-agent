@@ -1,0 +1,154 @@
+---
+title: vulcan.json 配置
+description: Gateway 配置文件 —— 所有字段、类型与默认值。
+---
+
+`vulcan.json` 位于 `<home_dir>/vulcan.json`（默认 `~/.vulcan/vulcan.json`）。Gateway 构造时通过 `GatewayConfig.model_validate_json` 加载为 `GatewayConfig`（pydantic 模型）。
+
+## 顶层 —— `GatewayConfig`
+
+| 字段              | 类型                           | 默认值             | 说明                                           |
+| ----------------- | ------------------------------ | ------------------ | ---------------------------------------------- |
+| `version`         | `str`                          | `vulcan.VERSION`   | Schema/版本标签，仅信息性。                    |
+| `default_runtime` | `str`                          | `"base-openai"`    | 当 session 尚未绑定运行时的回落值。必须是 `KNOWN_RUNTIMES` 中的一个 key。 |
+| `runtimes`        | `dict[str, RuntimeConfig]`     | `{}`               | 以注册名为 key 的运行时配置。                  |
+| `channels`        | `dict[str, ChannelConfig]`     | `{}`               | 以 channel 名为 key 的 channel 配置。          |
+
+该 schema 中所有 pydantic 模型均设置 `extra="forbid"` —— 未知字段会导致校验失败。
+
+## 按 session 的运行时绑定
+
+运行时选择是**按 session** 的，不是全局也不是按 channel。每个 session 的绑定落在 JSONL transcript 旁边的 sidecar 文件 `<session_id>.meta.json` 里：
+
+```json
+{"runtime_name": "claude-code"}
+```
+
+三处会写入这个文件：
+
+- `/switch <name>` —— 从当前 session 显式重绑。
+- API middleware —— 请求体的 `"model"` 字段非空时，在 gateway 派发之前就先持久化。
+- `Gateway.invoke_stream` —— 面对还没绑过的新 session，写入 `config.default_runtime`。
+
+`Session.runtime_name`（pydantic）在内存中承载绑定；meta 文件缺失时为 `None`。
+
+## `RuntimeConfig`
+
+位于 `runtimes.<name>`，`<name>` 为 `base-openai`、`claude-code`、`codex` 之一（见 [运行时](./runtimes)）。不在 `KNOWN_RUNTIMES` 中的名称在注册阶段被忽略。
+
+| 字段     | 类型          | 默认值                | 说明                                                                                             |
+| -------- | ------------- | --------------------- | ------------------------------------------------------------------------------------------------ |
+| `enable` | `bool`        | `false`               | 标记运行时为 `enabled` 的开关。`false` 时状态为 `disabled`。                                     |
+| `model`  | `ModelConfig` | `ModelConfig()`       | 模型参数。                                                                                       |
+
+`extra="forbid"`。
+
+## `ModelConfig`
+
+| 字段       | 别名    | 类型  | 默认值                                                         | 说明                                     |
+| ---------- | ------- | ----- | -------------------------------------------------------------- | ---------------------------------------- |
+| `name`     | `model` | `str` | `""`                                                           | 模型标识（如 `claude-sonnet-4-5`）。     |
+| `provider` | —       | `str` | `"openai"`                                                     | 模型提供方。                             |
+| `base_url` | —       | `str` | `"https://ark.cn-beijing.volces.com/api/v3/chat/completions"`  | 模型 API base URL。                      |
+| `api_key`  | —       | `str` | `""`                                                           | API key。                                |
+
+`model_config = ConfigDict(populate_by_name=True, extra="forbid")`。`name` 字段的别名为 `model`，`"model": "..."` 与 `"name": "..."` 都可解析；模板使用 `"model"`。
+
+`api_key` / `base_url` 为空字符串视为未设置，回落到 SDK 自身的解析（环境变量、本地 CLI 认证等）。
+
+## `ChannelConfig`
+
+位于 `channels.<name>`。`<name>` 由 `get_channel_cls(name)` 解析，未知名称抛出异常。
+
+| 字段      | 类型    | 默认值 | 说明                                                                                             |
+| --------- | ------- | ------ | ------------------------------------------------------------------------------------------------ |
+| `enable`  | `bool`  | `false`| `false` 时注册阶段跳过该 channel。                                                                |
+| `config`  | `dict`  | `{}`   | Channel 专属配置。字段见各 channel 文档。                                                         |
+
+`extra="forbid"`。Channel 不选运行时 —— 每个 session 自带绑定（见上文）。
+
+## 随包模板
+
+来自 `vulcan/template/vulcan.json`，首次启动时拷贝到 `home_dir`：
+
+```json
+{
+    "version": "0.1",
+    "default_runtime": "base-openai",
+    "runtimes": {
+        "base-openai": {
+            "enable": false,
+            "model": {
+                "name": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        },
+        "claude-code": {
+            "enable": false,
+            "model": {
+                "name": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        },
+        "codex": {
+            "enable": false,
+            "model": {
+                "name": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        }
+    },
+    "channels": {}
+}
+```
+
+## 完整示例
+
+```json
+{
+    "version": "0.1",
+    "default_runtime": "claude-code",
+    "runtimes": {
+        "base-openai": {
+            "enable": true,
+            "model": {
+                "name": "gpt-4o",
+                "provider": "openai",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "sk-..."
+            }
+        },
+        "claude-code": {
+            "enable": true,
+            "model": {
+                "name": "claude-sonnet-4-5",
+                "provider": "anthropic",
+                "base_url": "",
+                "api_key": ""
+            }
+        },
+        "codex": {
+            "enable": false,
+            "model": {
+                "name": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        }
+    },
+    "channels": {
+        "feishu": {
+            "enable": true,
+            "config": {
+                "app_id": "cli_...",
+                "app_secret": "..."
+            }
+        }
+    }
+}
+```
+
+这份示例中，`claude-code` 是未绑定过的 session 的回落值。`base-openai` 同样 `enabled`，可通过 `/switch base-openai` 或 API 的 `"model": "base-openai"` 使用。`codex` 状态为 `disabled`。

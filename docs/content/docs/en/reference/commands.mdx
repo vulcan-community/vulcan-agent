@@ -1,0 +1,236 @@
+---
+title: Slash commands
+description: Every registered slash command, its arguments, and its output shape.
+---
+
+Slash commands are control-plane messages matched by `CommandManager` before the gateway dispatches to an agent runtime. A command message is **not** persisted to the session transcript; its reply is returned as a `vulcan-system` `ChatCompletion`.
+
+## Matching rules
+
+A message matches a command when both hold:
+
+1. The raw text starts with `/`.
+2. The first whitespace-separated token (after stripping the leading `/`) equals the command's registered name.
+
+Arguments are the remaining whitespace-separated tokens.
+
+## Registered commands
+
+| Name        | Arguments                                    | Description                                                                                            |
+| ----------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `/new`      | —                                            | Clear the current session (delete its `.jsonl` + `.meta.json`).                                        |
+| `/switch`   | `<runtime_name>`                             | Switch **this session's** runtime.                                                                     |
+| `/sessions` | —                                            | List sessions.                                                                                         |
+| `/session`  | `<channel>/<session_id>` or `<session_id>`   | Show a session's raw JSONL.                                                                            |
+| `/runtime`  | —                                            | List every known runtime and its status (`enabled` / `disabled` / `uninstalled`).                      |
+| `/version`  | —                                            | Show the installed `vulcan-agent` version.                                                             |
+| `/status`   | —                                            | Show this session's binding plus its runtime and model configuration.                                  |
+| `/help`     | —                                            | List all available slash commands.                                                                     |
+
+Order is the registration order in `Gateway._register_commands`: `new`, `switch`, `sessions`, `session`, `runtime`, `version`, `status`, `help`.
+
+## `/new`
+
+Clear the current session — deletes both the transcript `.jsonl` and the `.meta.json` sidecar for `(channel_id, session_id)`. The next real message starts a fresh session bound to `config.default_runtime`.
+
+**Arguments** — none.
+
+**Behavior**
+
+Calls `session_manager.delete_session(channel_id, session_id)`. Missing sessions are treated as a legitimate state, not an error.
+
+**Output**
+
+Success:
+
+```
+Cleared session <channel_id>/<session_id>. Next message starts fresh.
+```
+
+Nothing to clear:
+
+```
+No session to clear for <channel_id>/<session_id>.
+```
+
+Unexpected failure:
+
+```
+Failed to clear session: <ExceptionType>: <message>
+```
+
+## `/switch`
+
+Rebind **the current session** to a different runtime. Other sessions keep their own bindings — runtime selection is per-session and different chats can run on different runtimes simultaneously.
+
+**Arguments**
+
+| Position | Name           | Required | Description                                  |
+| -------- | -------------- | -------- | -------------------------------------------- |
+| 0        | `runtime_name` | yes      | Name of an **enabled** registered runtime.   |
+
+**Behavior**
+
+Looks up the runtime via `RuntimeManager.get_runtime(name)`; if it returns `None`, the reply explains the runtime is not enabled and the binding is unchanged. Otherwise calls `session_manager.set_session_runtime(channel_id, session_id, name)`, which rewrites the session's `.meta.json` sidecar. The body is wrapped in a broad `try/except` so unexpected state errors are surfaced to the caller instead of crashing the request.
+
+**Output**
+
+```
+Switched this session to runtime: <runtime_name>.
+```
+
+When the positional argument is missing:
+
+```
+Usage: /switch <runtime_name>. Run /runtime to see enabled runtimes.
+```
+
+When the name is not enabled:
+
+```
+Runtime '<runtime_name>' is not enabled. See /runtime.
+```
+
+On any unexpected exception:
+
+```
+Failed to switch: <ExceptionType>: <message>
+```
+
+## `/sessions`
+
+List every session file under `<home>/sessions/`, sorted by file creation time (newest first).
+
+**Arguments** — none.
+
+**Output**
+
+```
+Sessions:
+  <channel>/<session_id>  <ISO-8601 ctime>
+  ...
+```
+
+Empty listing:
+
+```
+Sessions:
+  (none)
+```
+
+## `/session`
+
+Print a session's raw JSONL transcript.
+
+**Arguments**
+
+| Position | Name | Required | Description                                                                                                   |
+| -------- | ---- | -------- | ------------------------------------------------------------------------------------------------------------- |
+| 0        | spec | yes      | Either `<channel>/<session_id>` or a bare `<session_id>`. The bare form must match exactly one session file. |
+
+**Behavior**
+
+- With `/`: resolves to `<home>/sessions/<channel>/<session_id>.jsonl`.
+- Without `/`: globs `<home>/sessions/*/<session_id>.jsonl` and asserts exactly one match.
+
+**Output**
+
+The file's content, followed by a trailing newline.
+
+## `/runtime`
+
+List every name in `KNOWN_RUNTIMES` with its current status.
+
+**Arguments** — none.
+
+**Output**
+
+```
+Runtimes:
+  [*] <name>          — <status>
+  [ ] <name>          — <status>
+  ...
+```
+
+- `[*]` marks **the current session's** runtime — resolved from the session's sidecar meta, falling back to `config.default_runtime` when no binding has been written yet. Only rows whose status is `enabled` can be marked.
+- `<status>` is one of `enabled`, `disabled`, `uninstalled` — see [Runtimes](./runtimes) for definitions.
+- Name field is left-padded to 16 characters.
+
+## `/version`
+
+**Arguments** — none.
+
+**Output**
+
+```
+vulcan-agent <VERSION>
+```
+
+`<VERSION>` is read from `vulcan.version.VERSION`.
+
+## `/status`
+
+Report the current session's binding, the runtime it resolves to, and the model configuration that runtime is using.
+
+**Arguments** — none.
+
+**Behavior**
+
+- Reads the session's runtime binding via `session_manager.get_session_runtime()`. If none, the resolved runtime falls back to `config.default_runtime` and the session field is tagged as unbound.
+- Counts non-empty lines in the session's `.jsonl` directly — missing files count as `0`.
+- Looks up the resolved runtime via `RuntimeManager.get_runtime(name)`. When it is `None`, `class` is `—` and `status` is taken from `runtime_manager.status` (or `not-registered`).
+- Pulls `ModelConfig` from `runtime.agent_config.model`. The `api_key` field is never echoed — only `set` vs `(empty — using SDK default)`.
+
+**Output**
+
+```
+Session:
+  channel    : <channel_id>
+  id         : <session_id>
+  items      : <int count of JSONL lines>
+  runtime    : <runtime_name bound to this session, or '(unbound → default: <default_runtime>)'>
+
+Runtime:
+  name       : <resolved runtime name>
+  status     : <enabled | disabled | uninstalled | not-registered>
+  class      : <BaseRuntime subclass short name, e.g. ClaudeCodeRuntime>
+
+Model:
+  name       : <ModelConfig.name>
+  provider   : <ModelConfig.provider>
+  base_url   : <ModelConfig.base_url or '(default)'>
+  api_key    : <'set' if non-empty else '(empty — using SDK default)'>
+```
+
+## `/help`
+
+Iterates `CommandManager.list_commands()` (registration order) and prints each command's name and class-level `description`.
+
+**Arguments** — none.
+
+**Output**
+
+```
+Commands:
+  /<name> — <description>
+  ...
+```
+
+## Reply shape
+
+Every command returns a `ChatCompletion` built by `system_completion(text)`:
+
+```json
+{
+  "id": "<uuid>",
+  "object": "chat.completion",
+  "model": "vulcan-system",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": { "role": "assistant", "content": "<text>" }
+    }
+  ]
+}
+```

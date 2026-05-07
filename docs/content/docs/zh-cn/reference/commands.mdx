@@ -1,0 +1,236 @@
+---
+title: 斜杠命令
+description: 所有已注册斜杠命令的参数与输出格式。
+---
+
+斜杠命令是控制面消息，在 gateway 分派到 agent 运行时之前由 `CommandManager` 拦截匹配。命令消息 **不会** 写入 session 记录；其响应以 `vulcan-system` 的 `ChatCompletion` 形式返回。
+
+## 匹配规则
+
+同时满足两条时，消息被识别为命令：
+
+1. 原始文本以 `/` 开头。
+2. 首个空白分隔 token（去掉前导 `/`）等于已注册的命令名。
+
+剩余 token 作为参数。
+
+## 已注册命令
+
+| 名称        | 参数                                          | 说明                                                                                                   |
+| ----------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `/new`      | —                                             | 清空当前 session（删除其 `.jsonl` 与 `.meta.json`）。                                                  |
+| `/switch`   | `<runtime_name>`                              | 切换**当前 session** 的运行时。                                                                        |
+| `/sessions` | —                                             | 列出所有 session。                                                                                     |
+| `/session`  | `<channel>/<session_id>` 或 `<session_id>`    | 显示指定 session 的原始 JSONL。                                                                        |
+| `/runtime`  | —                                             | 列出所有已知运行时及其状态（`enabled` / `disabled` / `uninstalled`）。                                 |
+| `/version`  | —                                             | 显示已安装的 `vulcan-agent` 版本。                                                                     |
+| `/status`   | —                                             | 显示当前 session 的绑定以及所用运行时和模型配置。                                                      |
+| `/help`     | —                                             | 列出所有可用斜杠命令。                                                                                 |
+
+顺序即 `Gateway._register_commands` 的注册顺序：`new`、`switch`、`sessions`、`session`、`runtime`、`version`、`status`、`help`。
+
+## `/new`
+
+清空当前 session —— 同时删除 `(channel_id, session_id)` 对应的 `.jsonl` 和 `.meta.json` sidecar。下一次真实消息会重新建立 session，并绑定到 `config.default_runtime`。
+
+**参数** — 无。
+
+**行为**
+
+调用 `session_manager.delete_session(channel_id, session_id)`。如果 session 本来就不存在，不视作错误。
+
+**输出**
+
+成功：
+
+```
+Cleared session <channel_id>/<session_id>. Next message starts fresh.
+```
+
+没有可清理的 session：
+
+```
+No session to clear for <channel_id>/<session_id>.
+```
+
+未预期的异常：
+
+```
+Failed to clear session: <ExceptionType>: <message>
+```
+
+## `/switch`
+
+把**当前 session** 重绑到另一个运行时。其它 session 各自保留自己的绑定 —— 运行时选择是按 session 的，不同对话可以同时跑在不同运行时上。
+
+**参数**
+
+| 位置 | 名称           | 必填 | 说明                                           |
+| ---- | -------------- | ---- | ---------------------------------------------- |
+| 0    | `runtime_name` | 是   | 已注册且处于 **enabled** 状态的运行时名称。    |
+
+**行为**
+
+通过 `RuntimeManager.get_runtime(name)` 查找；返回 `None` 时回复提示未启用，绑定不变。否则调用 `session_manager.set_session_runtime(channel_id, session_id, name)`，重写 session 的 `.meta.json` sidecar。整个函数体被一个宽泛的 `try/except` 包住，避免未来可能引入的状态错误直接把请求打挂。
+
+**输出**
+
+```
+Switched this session to runtime: <runtime_name>.
+```
+
+缺少位置参数时：
+
+```
+Usage: /switch <runtime_name>. Run /runtime to see enabled runtimes.
+```
+
+名称未启用时：
+
+```
+Runtime '<runtime_name>' is not enabled. See /runtime.
+```
+
+发生未预期的异常时：
+
+```
+Failed to switch: <ExceptionType>: <message>
+```
+
+## `/sessions`
+
+列出 `<home>/sessions/` 下所有 session 文件，按文件创建时间降序。
+
+**参数** — 无。
+
+**输出**
+
+```
+Sessions:
+  <channel>/<session_id>  <ISO-8601 ctime>
+  ...
+```
+
+无记录时：
+
+```
+Sessions:
+  (none)
+```
+
+## `/session`
+
+打印指定 session 的原始 JSONL 记录。
+
+**参数**
+
+| 位置 | 名称 | 必填 | 说明                                                                                                    |
+| ---- | ---- | ---- | ------------------------------------------------------------------------------------------------------- |
+| 0    | spec | 是   | `<channel>/<session_id>` 或仅 `<session_id>`。后者必须唯一匹配一个 session 文件。                       |
+
+**行为**
+
+- 包含 `/`：解析为 `<home>/sessions/<channel>/<session_id>.jsonl`。
+- 不含 `/`：按 `<home>/sessions/*/<session_id>.jsonl` 进行 glob，断言恰好一个匹配。
+
+**输出**
+
+文件内容，末尾附加一个换行符。
+
+## `/runtime`
+
+列出 `KNOWN_RUNTIMES` 中的每个名称及当前状态。
+
+**参数** — 无。
+
+**输出**
+
+```
+Runtimes:
+  [*] <name>          — <status>
+  [ ] <name>          — <status>
+  ...
+```
+
+- `[*]` 标记**当前 session** 的运行时 —— 从 session 的 sidecar meta 解析，未写入时回落到 `config.default_runtime`。只有状态为 `enabled` 的行会被标记。
+- `<status>` 取值：`enabled`、`disabled`、`uninstalled`，定义见 [运行时](./runtimes)。
+- 名称列左对齐，宽度 16 字符。
+
+## `/version`
+
+**参数** — 无。
+
+**输出**
+
+```
+vulcan-agent <VERSION>
+```
+
+`<VERSION>` 取自 `vulcan.version.VERSION`。
+
+## `/status`
+
+报告当前 session 的绑定、实际解析到的运行时，以及该运行时使用的模型配置。
+
+**参数** — 无。
+
+**行为**
+
+- 通过 `session_manager.get_session_runtime()` 读取 session 的运行时绑定。若为空，解析结果回落到 `config.default_runtime`，session 字段会标注未绑定。
+- 直接按非空行统计 `.jsonl` 里的条目数 —— 文件不存在就是 `0`。
+- 通过 `RuntimeManager.get_runtime(name)` 查找解析后的运行时。返回 `None` 时，`class` 显示 `—`，`status` 回落到 `runtime_manager.status`（或 `not-registered`）。
+- 模型配置取自 `runtime.agent_config.model`。`api_key` 从不外露 —— 只显示 `set` 或 `(empty — using SDK default)`。
+
+**输出**
+
+```
+Session:
+  channel    : <channel_id>
+  id         : <session_id>
+  items      : <int count of JSONL lines>
+  runtime    : <runtime_name bound to this session, or '(unbound → default: <default_runtime>)'>
+
+Runtime:
+  name       : <resolved runtime name>
+  status     : <enabled | disabled | uninstalled | not-registered>
+  class      : <BaseRuntime subclass short name, e.g. ClaudeCodeRuntime>
+
+Model:
+  name       : <ModelConfig.name>
+  provider   : <ModelConfig.provider>
+  base_url   : <ModelConfig.base_url or '(default)'>
+  api_key    : <'set' if non-empty else '(empty — using SDK default)'>
+```
+
+## `/help`
+
+遍历 `CommandManager.list_commands()`（注册顺序），打印每个命令的名称与类级 `description`。
+
+**参数** — 无。
+
+**输出**
+
+```
+Commands:
+  /<name> — <description>
+  ...
+```
+
+## 响应格式
+
+每个命令返回由 `system_completion(text)` 构造的 `ChatCompletion`：
+
+```json
+{
+  "id": "<uuid>",
+  "object": "chat.completion",
+  "model": "vulcan-system",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": { "role": "assistant", "content": "<text>" }
+    }
+  ]
+}
+```

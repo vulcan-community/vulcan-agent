@@ -1,0 +1,98 @@
+---
+title: Write a slash command
+description: Add a new `/foo` command that Vulcan can handle from any channel.
+---
+
+You want `/uptime` (or whatever) to work inside any Vulcan chat — Feishu, curl, the Python SDK. Slash commands short-circuit the gateway before it hits a runtime, so they're cheap: one class, one registration.
+
+## 1. Create the package
+
+Drop two files under `vulcan/gateway/commands/uptime/`:
+
+```
+vulcan/gateway/commands/uptime/
+├── __init__.py
+└── uptime.py
+```
+
+`__init__.py` can stay empty — registration happens by importing the class directly in the gateway (see step 3).
+
+## 2. Subclass `BaseCommand`
+
+```python
+# vulcan/gateway/commands/uptime/uptime.py
+import time
+from typing import TYPE_CHECKING
+
+from openai.types.chat import ChatCompletion
+
+from ..base_command import BaseCommand
+
+if TYPE_CHECKING:
+    from ...gateway import Gateway
+
+
+_STARTED_AT = time.monotonic()
+
+
+class UptimeCommand(BaseCommand):
+    def __init__(self, gateway: "Gateway") -> None:
+        super().__init__(
+            command="uptime",
+            description="Show how long the gateway has been running: /uptime",
+        )
+        self._gateway = gateway
+
+    def exec(self, args: list[str]) -> ChatCompletion:
+        seconds = int(time.monotonic() - _STARTED_AT)
+        return self._reply(f"up for {seconds}s")
+```
+
+The contract:
+
+- `command` — the text after the `/`. `match_command` compares against the first whitespace-separated token, so `/uptime` and `/uptime foo` both route here.
+- `description` — one line, used by `/help`. Include the usage shape.
+- `exec(args)` — `args` is everything after the command token, split on whitespace. Return a `ChatCompletion`. `self._reply(str)` wraps a string into the conventional `vulcan-system` completion shape every command uses.
+
+## 3. Register it in the gateway
+
+Open `vulcan/gateway/gateway.py` and append your class to the tuple in `_register_commands`:
+
+```python
+def _register_commands(self) -> None:
+    from .commands.help.help import HelpCommand
+    from .commands.runtime.runtime import RuntimeCommand
+    from .commands.session.session import SessionCommand
+    from .commands.sessions.sessions import SessionsCommand
+    from .commands.switch.switch import SwitchCommand
+    from .commands.uptime.uptime import UptimeCommand
+    from .commands.version.version import VersionCommand
+
+    for cls in (
+        SwitchCommand,
+        SessionsCommand,
+        SessionCommand,
+        RuntimeCommand,
+        VersionCommand,
+        UptimeCommand,
+        HelpCommand,
+    ):
+        cmd = cls(gateway=self)
+        self.command_manager.register_command(cmd)
+```
+
+`/help` iterates `CommandManager.list_commands()`, so your new entry shows up there automatically — no `/help` edit needed.
+
+## 4. Restart and try it
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: default" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "/uptime"}]
+  }'
+```
+
+Slash commands are matched before the session save and the runtime dispatch in `Gateway.invoke_stream`, so they don't consume runtime tokens and don't get persisted into the session log. Same command works from Feishu — just send `/uptime` in the chat.

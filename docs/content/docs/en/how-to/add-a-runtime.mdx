@@ -1,0 +1,116 @@
+---
+title: Add a new agent runtime
+description: Plug a new agent runtime (not just a new LLM) into Vulcan.
+---
+
+You want Vulcan to dispatch to a new agent runtime — a full orchestration stack, not just a different LLM behind an OpenAI-compatible endpoint (if that's all you need, just configure `base-openai` or `claude-code` via `base_url` / `api_key`). Six steps.
+
+## 1. Subclass `BaseRuntime`
+
+Create `vulcan/runtime/<name>/<name>.py`. The interface is tiny — one sync check plus one async stream:
+
+```python
+# vulcan/runtime/my_runtime/my_runtime.py
+"""Minimal runtime that echoes the user prompt."""
+
+import importlib.util
+from collections.abc import AsyncIterator
+
+from ...types.invocation import InvocationContext
+from ...types.session import SessionItem
+from ...utils.messages import assistant_message, message_text
+from ..base_runtime import BaseRuntime
+
+
+class MyRuntime(BaseRuntime):
+    def is_installed(self) -> bool:
+        # Only claim "installed" when the optional SDK is importable.
+        return importlib.util.find_spec("my_sdk") is not None
+
+    async def invoke(
+        self, ctx: InvocationContext
+    ) -> AsyncIterator[SessionItem]:
+        # Defer SDK import so this module still loads when my_sdk is missing.
+        import my_sdk
+
+        persona = self.agent_config.instruction.render()
+        history = message_text(ctx.history_message)
+        prompt = message_text(ctx.message)
+
+        client = my_sdk.Client(
+            api_key=self.agent_config.model.api_key or None,
+            base_url=self.agent_config.model.base_url or None,
+        )
+        async for chunk in client.stream(persona, history, prompt):
+            yield assistant_message(chunk.text)
+```
+
+`InvocationContext` gives you three fields (see `vulcan/types/invocation.py:5-8`):
+
+- `channel_id` — which channel routed this turn.
+- `history_message` — a pre-rendered `user`-role `Message` containing prior turns. Some runtimes (`BaseOpenAIRuntime`) parse it back into discrete turns; simpler runtimes just concatenate it into the prompt (`CodexRuntime` does this).
+- `message` — the current user input.
+
+## 2. Defer optional-SDK imports
+
+Keep the SDK import inside method bodies, never at module top. `__init__.py` imports every known runtime class eagerly so `is_installed()` can report status, and users who haven't installed your extra must still be able to import the module. `CodexRuntime` shows the pattern — `importlib.util.find_spec` for the check, real imports inside `invoke` / helpers.
+
+## 3. Use the message factories
+
+Don't hand-roll `Message` or `ResponseReasoningItem` — `vulcan/utils/messages.py` has factories that every runtime shares:
+
+- `assistant_message(text)` — streaming text delta.
+- `reasoning_item(text)` — thinking / chain-of-thought.
+- `tool_call_item(call_id, name, arguments)` — tool invocation.
+- `tool_output_item(call_id, output, is_error=False)` — tool result, paired with the same `call_id`.
+
+Channels render each of these differently (Feishu renders `reasoning_item` as a blockquote and pairs tool call/output in a collapsible panel, for example). Use the right factory and every channel renders your output correctly.
+
+## 4. Register the name
+
+In `vulcan/runtime/__init__.py`, import the class and add it to `KNOWN_RUNTIMES`:
+
+```python
+from .my_runtime.my_runtime import MyRuntime
+
+KNOWN_RUNTIMES: dict[str, type[BaseRuntime]] = {
+    "base-openai": BaseOpenAIRuntime,
+    "claude-code": ClaudeCodeRuntime,
+    "codex": CodexRuntime,
+    "my-runtime": MyRuntime,
+}
+```
+
+The gateway iterates `KNOWN_RUNTIMES` at startup, instantiates each class, and records its status as `enabled` / `disabled` / `uninstalled` via `RuntimeManager.register` (see `vulcan/runtime/runtime_manager.py:23-57`).
+
+## 5. Declare the optional extra
+
+Add your SDK dep to `[project.optional-dependencies]` in `pyproject.toml`:
+
+```toml
+[project.optional-dependencies]
+my-runtime = ["my-sdk>=1.0.0"]
+```
+
+Users install it with `uv sync --extra my-runtime`.
+
+## 6. Users enable it in `vulcan.json`
+
+```json
+{
+  "runtimes": {
+    "my-runtime": {
+      "enable": true,
+      "model": {
+        "name": "",
+        "base_url": "",
+        "api_key": ""
+      }
+    }
+  }
+}
+```
+
+Restart. `/runtime` from any channel should now list `my-runtime` as `enabled`. Users opt in **per session** — `/switch my-runtime` rebinds the current chat, or API callers set `"model": "my-runtime"` (the middleware persists it to the session's meta sidecar). Other sessions keep their own bindings. To make your runtime the fallback for brand-new sessions, set `"default_runtime": "my-runtime"` at the top of `vulcan.json`.
+
+For the semantics of `history_message` vs. `message` and how the gateway assembles them from the session log, see [Message flow](/docs/explanation/message-flow).

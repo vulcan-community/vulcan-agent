@@ -1,0 +1,4 @@
+{
+  "title": "How-to guides",
+  "pages": ["connect-feishu", "use-openai-client", "write-a-command", "add-a-runtime"]
+}

@@ -1,0 +1,101 @@
+---
+title: Agent 运行时
+description: 内置 agent 运行时、注册名与各自暴露的能力。
+---
+
+**Agent 运行时** 是 gateway 驱动的完整编排栈。运行时按名称注册；`Gateway._register_runtimes` 遍历 `KNOWN_RUNTIMES` 并对每一项进行探测。`RuntimeManager.status` 按名称记录探测结果。
+
+## 注册表
+
+| 注册名         | 类                   | 可选 extra                |
+| -------------- | -------------------- | ------------------------- |
+| `base-openai`  | `BaseOpenAIRuntime`  | — （内置，始终可用）      |
+| `claude-code`  | `ClaudeCodeRuntime`  | `claude-code`             |
+| `codex`        | `CodexRuntime`       | `codex`                   |
+
+安装可选 extra：`uv sync --extra <name>`。
+
+## 状态
+
+`/runtime` 为 `KNOWN_RUNTIMES` 中的每个名称报告三种状态之一：
+
+| 状态          | 条件                                                                     |
+| ------------- | ------------------------------------------------------------------------ |
+| `enabled`     | 运行时的 `is_installed()` 返回 `True`，**且** `vulcan.json` 中存在 `runtimes.<name>` 且 `enable: true`。已注册到 `RuntimeManager._runtimes`。 |
+| `disabled`    | `is_installed()` 返回 `True`，但 `vulcan.json` 中不存在该名称或 `enable` 为 `false`。 |
+| `uninstalled` | 可选 SDK 依赖不可导入。通过 `importlib.util.find_spec(...)` 检测。       |
+
+"当前"是**按 session** 的概念 —— 每个 session 的绑定在自己的 `.meta.json` sidecar 里。`RuntimeManager` 上没有全局 `curr_runtime`。未绑定的新 session 回落到 `config.default_runtime`；`/switch` 或 API 的 `"model"` 字段只重绑当前这个 session。
+
+## `base-openai`
+
+OpenAI 兼容的 Chat Completions 运行时。
+
+| 属性                     | 值                                                                                                 |
+| ------------------------ | -------------------------------------------------------------------------------------------------- |
+| `is_installed()`         | 恒为 `True`（`openai` 为核心依赖）。                                                               |
+| SDK 客户端               | `openai.AsyncOpenAI`，首次 `invoke` 时用 `ModelConfig.api_key` + `base_url` 懒构造。                |
+| `base_url` 默认值        | `https://ark.cn-beijing.volces.com/api/v3/chat/completions`（`ModelConfig` 默认值）。              |
+| 流式                     | `stream=True` chat completions；仅文本 delta。                                                     |
+| yield 的 SessionItem     | `Message`（assistant，text）。                                                                     |
+| Tool calls               | 不透出。                                                                                           |
+| Reasoning / thinking     | 不透出。                                                                                           |
+| Persona 注入             | `Instruction.render()` 结果作为首条 `system` 消息。                                                |
+| History                  | gateway 渲染的历史会被解析回多轮 `user` / `assistant` chat 消息。                                  |
+
+### base-openai 注意事项
+
+- 拒绝 `"openai"` 以外的任何 `provider`。`invoke()` 会抛出 `ValueError`，消息中包含运行时名和配置的 provider。其他 provider（Claude 的 `"anthropic"` 等）应由对应运行时承载（`claude-code`、`codex`）—— 这种拆分是刻意的，因为这些运行时注入 persona 与流式透出工具事件的方式不同。
+
+## `claude-code`
+
+封装官方 `claude-agent-sdk`（`ClaudeSDKClient`）。
+
+| 属性                     | 值                                                                                                 |
+| ------------------------ | -------------------------------------------------------------------------------------------------- |
+| `is_installed()`         | `importlib.util.find_spec("claude_agent_sdk") is not None`。                                       |
+| SDK 选项                 | `ClaudeAgentOptions(model=..., env=..., setting_sources=..., max_thinking_tokens=4000, system_prompt={"type": "preset", "preset": "claude_code", "append": <persona>})`。 |
+| Model                    | `ModelConfig.name` → `ClaudeAgentOptions.model`（为空时传 `None`）。                               |
+| 凭证                     | `api_key` / `base_url` 非空时，注入为环境变量 `ANTHROPIC_API_KEY` 与 `ANTHROPIC_BASE_URL`。        |
+| Setting sources          | **提供 `api_key` 时** `setting_sources=[]`，隔离本地 `claude` CLI 认证。未提供 `api_key` 时 `setting_sources=None`（SDK 默认：继承本地认证）。 |
+| Persona 注入             | 追加到内置 `claude_code` preset 的 system prompt。                                                 |
+| yield 的 SessionItem     | `Message`（assistant text）、reasoning、function_call（tool use）、function_call_output（tool result）。 |
+| Block 映射               | `TextBlock` → assistant message；`ThinkingBlock` → reasoning；`ToolUseBlock` → tool call；`ToolResultBlock` → tool output。 |
+
+## `codex`
+
+封装 `openai-codex-sdk`，后者通过 stdio JSONL 包装随包的 `codex` CLI 二进制。
+
+| 属性                     | 值                                                                                                 |
+| ------------------------ | -------------------------------------------------------------------------------------------------- |
+| `is_installed()`         | `importlib.util.find_spec("openai_codex_sdk") is not None`。                                       |
+| CLI 依赖                 | 需要 `codex` CLI 二进制位于 PATH。通过 `codex login` 或 `Codex.install(...)` 安装。                |
+| SDK 构造                 | `Codex({"api_key": ..., "base_url": ...})`。                                                       |
+| Thread 选项              | `model`、`skip_git_repo_check=True`、`sandbox_mode="workspace-write"`、`approval_policy="never"`。 |
+| System prompt            | 无对应槽 —— persona 与 history、current input 按 `\n\n` 拼接后整体作为 prompt。                    |
+| 流式                     | `thread.run_streamed(prompt)`；text / reasoning item 为全量 buffer 更新，运行时按 `item.id` 用 `seen_len` 计算 delta。 |
+| yield 的 SessionItem     | `Message`（assistant）、reasoning、function_call（shell / MCP / web_search / file_change）、function_call_output。 |
+| 事件映射                 | `AgentMessageItem` → assistant message；`ReasoningItem` → reasoning；`CommandExecutionItem` → `shell` tool call + output；`McpToolCallItem` → `<server>.<tool>` tool call + output；`WebSearchItem` → `web_search` tool call + output；`FileChangeItem` → `file_change` tool call + output（completion 时成对发出）；`ErrorItem` → 以 `[codex error]` 前缀的 assistant message。 |
+
+### Codex 注意事项
+
+- `sandbox_mode="workspace-write"` 允许工作区内文件写入。运行目录需容许 Codex 修改。
+- `approval_policy="never"` 阻止 CLI 交互确认。Vulcan 以非交互模式运行。
+- `skip_git_repo_check=True` 允许在非 git 仓库下运行。
+
+## `is_installed()`
+
+每个具体运行时都实现 `is_installed() -> bool`。基类不静态导入可选 SDK；导入延迟到 `invoke()`，使模块始终可加载。
+
+## SessionItem 类型
+
+`SessionItem` 即 `openai.types.conversations.ConversationItem`，按 `type` 判别：
+
+| `type`                   | 产生者                | 含义                       |
+| ------------------------ | --------------------- | -------------------------- |
+| `message`                | 全部运行时            | Assistant 文本。           |
+| `reasoning`              | claude-code、codex    | 模型思考。                 |
+| `function_call`          | claude-code、codex    | 工具调用。                 |
+| `function_call_output`   | claude-code、codex    | 工具结果。                 |
+
+`base-openai` 仅产出 `message`。

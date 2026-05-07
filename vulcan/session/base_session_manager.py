@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from typing import List
 
 from openai.types.conversations.message import Message
 
@@ -10,7 +9,9 @@ class BaseSessionManager(ABC):
     def __init__(self): ...
 
     @abstractmethod
-    def create_session(self, channel_id: str, session_id: str) -> None: ...
+    def create_session(
+        self, channel_id: str, session_id: str, runtime_name: str
+    ) -> None: ...
 
     @abstractmethod
     def append_to_session(
@@ -27,9 +28,19 @@ class BaseSessionManager(ABC):
     def delete_session(self, channel_id: str, session_id: str): ...
 
     @abstractmethod
-    def get_session_ids(self, channel_id: str) -> List[str]: ...
+    def get_session_ids(self, channel_id: str) -> list[str]: ...
 
     @abstractmethod
     def assembly_history_messages(
         self, channel_id: str, session_id: str
     ) -> Message: ...
+
+    @abstractmethod
+    def get_session_runtime(
+        self, channel_id: str, session_id: str
+    ) -> str | None: ...
+
+    @abstractmethod
+    def set_session_runtime(
+        self, channel_id: str, session_id: str, runtime_name: str
+    ) -> None: ...

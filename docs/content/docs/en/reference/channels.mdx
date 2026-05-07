@@ -1,0 +1,103 @@
+---
+title: Channels
+description: The BaseChannel interface and every built-in channel.
+---
+
+A **channel** is a front-end transport that receives user messages from an external platform and forwards them to `Gateway.invoke_stream`. Channels are registered at gateway construction from `GatewayConfig.channels`; channels with `enable: false` are skipped.
+
+## `BaseChannel`
+
+Abstract base in `vulcan.gateway.channels.base_channel`.
+
+### Constructor
+
+```python
+BaseChannel(
+    name: str,
+    gateway: "Gateway",
+    description: str = "",
+    config: dict = {},
+)
+```
+
+| Parameter     | Description                                                   |
+| ------------- | ------------------------------------------------------------- |
+| `name`        | Channel instance name (used as `channel_id` in gateway calls).|
+| `gateway`     | Back-reference to the owning `Gateway`.                       |
+| `description` | Free-form description (unused by the base).                   |
+| `config`      | Channel-specific `config` dict from `vulcan.json`.            |
+
+Channels do not pick a runtime. Runtime selection is per-session — the gateway resolves it from the session's sidecar meta (written by `/switch`, the API middleware, or the fresh-session fallback to `config.default_runtime`).
+
+### Forwarding methods
+
+Both are `@final` and delegate directly to the gateway. They pass `self.name` as `channel_id`.
+
+```python
+async def invoke(
+    self,
+    session_id: str,
+    user_message: Message,
+) -> ChatCompletion: ...
+
+async def invoke_stream(
+    self,
+    session_id: str,
+    user_message: Message,
+) -> AsyncIterator[SessionItem]: ...
+```
+
+`/switch <name>` from inside any conversation rebinds only that session.
+
+## Registry
+
+| Name     | Class           | Optional extra |
+| -------- | --------------- | -------------- |
+| `feishu` | `FeishuChannel` | `feishu`       |
+
+Resolution happens in `vulcan.gateway.channels.get_channel_cls(name)`. Unknown names raise `ValueError`.
+
+## `feishu`
+
+A `BaseChannel` implementation that bridges Feishu (Lark) chat to Vulcan via a long-connection WebSocket subscription. No public webhook URL is required.
+
+### Config
+
+Fields under `channels.feishu.config`:
+
+| Field        | Type | Required | Description                                |
+| ------------ | ---- | -------- | ------------------------------------------ |
+| `app_id`     | str  | yes      | Feishu app ID (e.g. `cli_...`).            |
+| `app_secret` | str  | yes      | Feishu app secret.                         |
+
+### Behavior
+
+- Construction builds an `lark.Client` and spawns a daemon thread running `ws.start()`.
+- Inbound `P2ImMessageReceiveV1` events schedule an async `handle_event` task on the running loop.
+- Reaction-echo events (`reaction_created` / `reaction_deleted`) are swallowed to avoid feedback loops from `send_reaction`.
+- Each turn:
+  1. `send_reaction` — ack emoji on the source message.
+  2. `CardSession.start()` — create a CardKit card as reply.
+  3. `self.invoke_stream(session_id=<chat_id>, user_message=...)` — gateway-driven runtime dispatch.
+  4. Progressive rendering per `SessionItem` type (table below).
+  5. `CardSession.finish()` — clear the streaming indicator.
+
+### SessionItem rendering
+
+| SessionItem                            | Feishu rendering                                                    |
+| -------------------------------------- | ------------------------------------------------------------------- |
+| `Message` (assistant, text chunks)     | Accumulated into one streaming markdown element.                    |
+| `ResponseReasoningItem`                | New markdown element, rendered as `>` blockquote.                   |
+| `ResponseFunctionToolCallItem`         | New `collapsible_panel` titled with the tool name; body shows args. |
+| `ResponseFunctionToolCallOutputItem`   | Same panel (paired by `call_id`) — inner markdown adds a result section; `is_error = status == "incomplete"`. |
+
+### `session_id` mapping
+
+`session_id` is set to the Feishu `chat_id` of the inbound message — one Feishu chat equals one Vulcan session.
+
+## Planned channels
+
+| Name      | Status      |
+| --------- | ----------- |
+| `slack`   | coming soon |
+| `discord` | coming soon |

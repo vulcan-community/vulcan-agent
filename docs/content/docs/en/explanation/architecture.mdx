@@ -1,0 +1,115 @@
+---
+title: Architecture
+description: The Gateway is the center. Everything else — channels, the API server, commands, runtimes, sessions — is arranged around it to do one job each.
+---
+
+Vulcan is organised around a single orchestrator. Every inbound message, no matter where it came from, funnels into `Gateway.invoke_stream`. Every outbound event flows back out the same way. The rest of the codebase is five concerns arranged around that hub, each doing exactly one job.
+
+This page walks each concern, says what it is for, and — more usefully — says what it is *not* for.
+
+## The shape
+
+```text
+          HTTP clients                          Chat platforms
+      (curl, openai SDK,                        (Feishu today;
+       OpenWebUI, ...)                           Slack, Discord planned)
+              │                                        │
+              ▼                                        ▼
+     ┌────────────────────┐                  ┌───────────────────┐
+     │  api_server        │                  │   channels/       │
+     │  (Starlette mw)    │                  │   BaseChannel     │
+     │  non-streaming     │                  │   streaming       │
+     └─────────┬──────────┘                  └─────────┬─────────┘
+               │ invoke()                              │ invoke_stream()
+               └────────────────┬──────────────────────┘
+                                ▼
+                   ┌───────────────────────────┐
+                   │        Gateway            │◄── CommandManager
+                   │   invoke_stream (7 steps) │    (slash cmds,
+                   │                           │     short-circuit)
+                   └───┬────────────┬──────────┘
+                       │            │
+               ctx ──► │            │ ◄── history_message
+                       ▼            ▼
+              ┌──────────────┐  ┌────────────────────┐
+              │ RuntimeMgr   │  │ LocalSessionMgr    │
+              │  Claude Code │  │  ~/.vulcan/        │
+              │  Codex       │  │   sessions/        │
+              │  Base OpenAI │  │    <channel_id>/   │
+              │  ADK (soon)  │  │     <sid>.jsonl    │
+              └──────┬───────┘  └────────────────────┘
+                     │
+                     ▼  AsyncIterator[SessionItem]
+              (text | reasoning | tool_call | tool_output)
+```
+
+## Gateway — the orchestrator
+
+`vulcan/gateway/gateway.py` is the whole story in one file. `Gateway.__init__` wires everything: it prepares the home dir, loads `vulcan.json` into a `GatewayConfig`, reads the three persona files (`IDENTITY.md`, `SOUL.md`, `TOOL.md`) into an `Instruction`, registers every runtime, every command, and every enabled channel, and spins up the API server.
+
+There are two entry points and one of them is a wrapper over the other:
+
+- `invoke_stream(channel_id, session_id, user_message) -> AsyncIterator[SessionItem]` is the real thing. It yields events as the runtime produces them.
+- `invoke(...)` drains the stream, concatenates assistant text, and wraps the result in a `ChatCompletion` for clients that can't handle streaming.
+
+Neither takes a `runtime_name` argument — runtime selection is per-session, resolved from the session's sidecar meta (with `config.default_runtime` as the fallback).
+
+The streaming path is seven steps and worth quoting directly from the source because each step is a distinct responsibility:
+
+1. **Match a slash command.** If the message starts with `/`, hand off to `CommandManager` and return the command's reply. This short-circuits before the runtime is even consulted — and before the message is persisted, so commands never pollute a session. `/switch` mutates the session's sidecar meta here and returns.
+2. **Resolve the session's runtime.** Read the session's `.meta.json` sidecar; fall back to `config.default_runtime` if it's missing. `create_session` is idempotent — it touches the JSONL if missing and writes the meta sidecar with the resolved name.
+3. **Assemble history.** Call `session_manager.assembly_history_messages(channel_id, session_id)` *before* writing the current turn, so the history the runtime sees doesn't contain the message the runtime is about to answer.
+4. **Persist the user message** to the JSONL file.
+5. **Build an `InvocationContext`** — exactly three fields: `channel_id`, `history_message`, `message`.
+6. **Drive the runtime**, yield each `SessionItem` to the caller, and accumulate assistant text in parallel.
+7. **Persist the aggregated assistant turn** as one final `Message`.
+
+Step 3-before-4 is a small detail with a large consequence: the runtime's input is always clean, and the transcript is always complete. Step 6-and-7 is another: the caller gets streaming, the store gets a compacted single assistant turn, and both are consistent because they come from the same accumulation.
+
+## Two inbound paths, one funnel
+
+The API server (`vulcan/api_server/app.py`) and channels (`vulcan/gateway/channels/`) look like different code paths, but they terminate at the same place.
+
+The API server mounts `MessageMiddleware` over the LiteLLM proxy app. It intercepts `POST /v1/chat/completions`, pulls `x-session-id` from headers, and — if the request body carries a `"model"` — writes it to the session's sidecar meta *before* calling the gateway. This makes `"model"` an implicit `/switch` for that session: subsequent turns on the same `x-session-id` stay on that runtime until the client picks a different one. A missing or empty `"model"` preserves the existing binding. The `channel_id` is always the constant `GATEWAY_CHANNEL_ID = "gateway"`. The API server does not stream.
+
+Channels do stream. A `BaseChannel` (`vulcan/gateway/channels/base_channel.py`) is a transport adapter: Feishu, Slack later, Discord later. Its `invoke_stream(session_id, user_message)` is marked `@final` and forwards straight to `gateway.invoke_stream(self.name, session_id, user_message)`. A channel decides how to render the incoming `SessionItem` stream — Feishu paints a progressive CardKit card so users watch thinking, tool calls, and text deltas land as they happen.
+
+Both paths converge at `Gateway.invoke_stream`. There is exactly one code path for producing a response, regardless of origin. That is why the control plane (commands) only needs to live in one place, why the session store only needs to know about `channel_id`, and why adding Slack later is mostly a rendering problem.
+
+## Channel — a transport, not a protocol
+
+A channel is the minimum glue needed to pull a user message off a transport and push a `SessionItem` stream back onto it. The `BaseChannel` surface is deliberately almost empty — two `@final` methods that delegate to the gateway. Everything else is transport-specific: Feishu event subscriptions, Slack event verification, Discord gateway websockets. Those details don't belong near the orchestrator.
+
+The name of the channel is also the `channel_id` used in session paths. That means Feishu's sessions live in `~/.vulcan/sessions/feishu/`, the HTTP API's live in `~/.vulcan/sessions/gateway/`, and the two never collide. See [Why channel_id, not user_id](/docs/explanation/message-flow#why-channel_id-is-the-namespace) in the message-flow page.
+
+## Command — the control plane
+
+`CommandManager` (`vulcan/gateway/commands/command_manager.py`) holds an ordered list of `BaseCommand`s and a single `match_command(text)` method. If the message starts with `/` and the first token matches a registered command, the gateway hands it off and the runtime is never called.
+
+This is the only short-circuit in the system. It is what makes `/switch claude-code`, `/sessions`, `/runtime` work from any channel without special casing. A command's `exec` returns a `ChatCompletion` shaped like a normal assistant reply, wrapped by `system_completion` — the channel renders it exactly the same way it would render a runtime reply, so there's no special rendering path either.
+
+Commands are control-plane on purpose: they do not get persisted to the session. If they did, restarting a session would re-run every `/switch` in the history. Short-circuiting before step 2 of `invoke_stream` is how that's prevented.
+
+## Runtime — the interchangeable part
+
+Runtimes are documented in their own page: [Why agent runtimes, not models](/docs/explanation/agent-runtimes). The short version from the orchestrator's perspective: a runtime is a class that implements `invoke(ctx) -> AsyncIterator[SessionItem]` and `is_installed() -> bool`, and the gateway doesn't need to know anything else about it.
+
+`RuntimeManager` (`vulcan/runtime/runtime_manager.py`) tracks three states per registered name — enabled / disabled / uninstalled — and offers one lookup, `get_runtime(name)`. It has no "current runtime" concept; the binding is per-session and lives in the session's sidecar meta. `/switch` rewrites that sidecar for the session that issued it. Because runtimes are stateless across turns (see the message-flow page), the switch is instantaneous: nothing needs to be handed off, serialised, or rebuilt. Different sessions can run on different runtimes simultaneously.
+
+## Session — transcript, not state
+
+The session manager holds the only piece of persistent state in the system: a JSONL file per `(channel_id, session_id)` pair, at `~/.vulcan/sessions/<channel_id>/<session_id>.jsonl`, plus a small `<session_id>.meta.json` sidecar next to it that carries the session's runtime binding. Each JSONL line is one `SessionItem` — a message, a tool call, a tool output, a reasoning block. The transcript is append-only during normal operation; the sidecar is overwritten on rebind.
+
+This is an opinionated choice. The alternatives — a SQLite DB, a structured object model, a vendor-specific conversation store — would all be more powerful. JSONL is not more powerful; it is more honest. You can `cat` a session and read it. You can `grep` across all your sessions. You can delete a bad turn with `sed`. You can back the directory up with `cp -r`. The format is the documentation.
+
+`assembly_history_messages` builds the history the runtime sees by concatenating every line verbatim inside a `<previous_conversations>...</previous_conversations>` wrapper, then handing it back as one user-role `Message`. Why it's done that way is the next page's topic.
+
+## What the Gateway is not
+
+A few things the gateway deliberately doesn't do, because deferring them keeps the center small:
+
+- **It doesn't speak any transport.** Starlette lives in `api_server/`; Lark SDK lives in `channels/feishu/`. The gateway only handles `Message` in, `SessionItem` out.
+- **It doesn't know about tools.** Tool calls are events that runtimes emit. The gateway passes them through. Which tools exist, how they run, how they're sandboxed — runtime's problem.
+- **It doesn't template prompts.** It hands the persona text and the history as raw inputs to the runtime, and each runtime decides how to inject them (append to system, prepend to user, etc.). The gateway has opinions about *what* goes in; it has no opinions about *how* a given stack wants to receive it.
+
+Each of these is a temptation. Resisting them is why the center stays legible.

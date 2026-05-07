@@ -1,0 +1,70 @@
+---
+title: Drive Vulcan from the OpenAI SDK
+description: Talk to Vulcan with the `openai` Python SDK or `curl`.
+---
+
+Vulcan's HTTP surface is OpenAI Chat Completions — anything that speaks that API can drive it. No Vulcan-specific client required.
+
+## 1. Start the gateway
+
+```python
+from pathlib import Path
+from vulcan.gateway.gateway import Gateway
+
+Gateway(home_dir=Path("~/.vulcan").expanduser()).start()
+```
+
+It listens on `http://0.0.0.0:4000`.
+
+## 2. Point the OpenAI SDK at it
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:4000/v1",
+    api_key="anything",  # unused, but the SDK requires it
+)
+
+reply = client.chat.completions.create(
+    model="claude-code",
+    messages=[{"role": "user", "content": "hello"}],
+    extra_headers={"X-Session-Id": "my-session"},
+)
+print(reply.choices[0].message.content)
+```
+
+A few things to know:
+
+- **`model` is a runtime name, not an LLM.** Pass one of the enabled runtimes — run `/runtime` from any channel to see the list (`claude-code`, `codex`, `base-openai`, …). The string you pass picks which agent runtime handles the turn.
+- **`X-Session-Id` is how turns stitch together.** Keep sending the same ID and Vulcan replays prior turns as history. Omit the header and Vulcan falls back to the session named `default`. The `channel_id` on the gateway side is always `"gateway"` for HTTP traffic.
+- **`model` is an implicit `/switch`.** The middleware writes `body["model"]` to the session's `.meta.json` sidecar *before* dispatching, so subsequent turns on the same `X-Session-Id` stay on that runtime unless you send another `model`. Omitting `"model"` preserves the existing binding; a brand-new session with no binding and no `"model"` falls back to `config.default_runtime` from `vulcan.json`.
+
+## 3. Equivalent `curl`
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: my-session" \
+  -d '{
+    "model": "claude-code",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
+```
+
+## Switching runtimes from the API
+
+Two ways, both per-session:
+
+1. **Pass a different `model`.** The middleware persists it to this session's meta before dispatching. The next request on the same `X-Session-Id` continues on the new runtime even if you omit `model`.
+2. **Send `/switch <name>` as a message.** Same effect, but triggered from the chat side. Different Feishu chats or different `X-Session-Id`s keep their own bindings — `/switch` only affects the session that issued it.
+
+```python
+client.chat.completions.create(
+    model="claude-code",   # handles this /switch turn AND rebinds the session
+    messages=[{"role": "user", "content": "/switch codex"}],
+    extra_headers={"X-Session-Id": "my-session"},
+)
+```
+
+After this call, `my-session` is bound to `codex`. There's no global "current runtime" — other `X-Session-Id`s and other channels are unaffected.

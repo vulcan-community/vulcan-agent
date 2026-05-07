@@ -1,0 +1,115 @@
+---
+title: 架构
+description: Gateway 是中心。其它一切——channel、API server、command、runtime、session——都围绕它摆放,各司其职。
+---
+
+Vulcan 围绕一个 orchestrator 组织起来。所有进入的消息,无论来自哪里,最终都汇到 `Gateway.invoke_stream`;所有发出的事件也原路返回。代码库其余部分就是围着这个中心的五个关注点,每个只做一件事。
+
+这一页依次走一遍每个关注点,说它**是做什么的**,以及——更有用地——说它**不是做什么的**。
+
+## 整体形状
+
+```text
+          HTTP 客户端                        聊天平台
+      (curl、openai SDK、                   (目前是飞书;
+       OpenWebUI 等)                         Slack、Discord 规划中)
+              │                                        │
+              ▼                                        ▼
+     ┌────────────────────┐                  ┌───────────────────┐
+     │  api_server        │                  │   channels/       │
+     │  (Starlette mw)    │                  │   BaseChannel     │
+     │  非流式            │                  │   流式            │
+     └─────────┬──────────┘                  └─────────┬─────────┘
+               │ invoke()                              │ invoke_stream()
+               └────────────────┬──────────────────────┘
+                                ▼
+                   ┌───────────────────────────┐
+                   │        Gateway            │◄── CommandManager
+                   │   invoke_stream(7 步)    │    (slash command、
+                   │                           │     短路)
+                   └───┬────────────┬──────────┘
+                       │            │
+               ctx ──► │            │ ◄── history_message
+                       ▼            ▼
+              ┌──────────────┐  ┌────────────────────┐
+              │ RuntimeMgr   │  │ LocalSessionMgr    │
+              │  Claude Code │  │  ~/.vulcan/        │
+              │  Codex       │  │   sessions/        │
+              │  Base OpenAI │  │    <channel_id>/   │
+              │  ADK(待加) │  │     <sid>.jsonl    │
+              └──────┬───────┘  └────────────────────┘
+                     │
+                     ▼  AsyncIterator[SessionItem]
+              (text | reasoning | tool_call | tool_output)
+```
+
+## Gateway——orchestrator
+
+`vulcan/gateway/gateway.py` 一个文件就是全部故事。`Gateway.__init__` 把所有东西接上:准备 home 目录,把 `vulcan.json` 读成 `GatewayConfig`,把三份人格文件(`IDENTITY.md`、`SOUL.md`、`TOOL.md`)读成 `Instruction`,注册所有 runtime、所有 command、所有已启用 channel,再起 API server。
+
+有两个入口,其中一个是另一个的包装:
+
+- `invoke_stream(channel_id, session_id, user_message) -> AsyncIterator[SessionItem]` 是真正做事的那个,runtime 产生事件就往外 yield。
+- `invoke(...)` 把流抽干,把 assistant 文本拼起来,包成一个 `ChatCompletion`,给不吃流式的客户端用。
+
+两者都不带 `runtime_name` 参数 —— runtime 选择是按 session 的,从 session 的 sidecar meta 解析(缺失时回落到 `config.default_runtime`)。
+
+streaming 路径是七步,值得直接对着源码说,因为每一步都是一个明确的职责:
+
+1. **匹配 slash command。** 如果消息以 `/` 开头,交给 `CommandManager`,返回命令的回复。这一步**在 runtime 还没被问到之前就短路了**,而且**在消息被持久化之前**,所以 command 永远不会污染 session。`/switch` 在这一步改写 session 的 sidecar meta 后返回。
+2. **解析这个 session 的 runtime。** 读 session 的 `.meta.json` sidecar;缺失时回落到 `config.default_runtime`。`create_session` 是幂等的 —— 缺 JSONL 就 touch,然后用解析出来的名字写 meta sidecar。
+3. **组装 history。** 调 `session_manager.assembly_history_messages(channel_id, session_id)`,这一步在写当前 turn **之前**,所以 runtime 看到的 history 不包含它即将要回答的那条消息。
+4. **把用户消息持久化**到 JSONL 文件。
+5. **构造 `InvocationContext`** —— 就三个字段:`channel_id`、`history_message`、`message`。
+6. **驱动 runtime**,每拿到一个 `SessionItem` 就 yield 给调用者,同时累计 assistant 文本。
+7. **把累计好的 assistant turn** 作为一条 `Message` 落盘。
+
+第 3 步在第 4 步之前,这个细节小但后果大:runtime 的输入始终干净,transcript 始终完整。第 6 步和第 7 步也是:调用者拿到流式,存储拿到压缩过的一条 assistant turn,两边一致,因为都来自同一次累计。
+
+## 两条入路,一个漏斗
+
+API server(`vulcan/api_server/app.py`)和 channel(`vulcan/gateway/channels/`)看起来是两条代码路径,但它们汇到同一个地方。
+
+API server 在 LiteLLM proxy app 上挂了一个 `MessageMiddleware`,拦截 `POST /v1/chat/completions`:从 header 拿 `x-session-id`,如果请求 body 里带了 `"model"`,就在调 gateway **之前** 先把它写进 session 的 sidecar meta。这让 `"model"` 变成这个 session 的隐式 `/switch`:同一个 `x-session-id` 的后续 turn 会一直跑在那个 runtime 上,直到调用方换一个。`"model"` 为空或缺失时保持现有绑定。`channel_id` 恒定是 `GATEWAY_CHANNEL_ID = "gateway"`。API server 不做流。
+
+channel 做流。`BaseChannel`(`vulcan/gateway/channels/base_channel.py`)是传输适配器:目前是飞书,之后是 Slack、Discord。它的 `invoke_stream(session_id, user_message)` 标了 `@final`,直接转发给 `gateway.invoke_stream(self.name, session_id, user_message)`。channel 自己决定怎么渲染这条 `SessionItem` 流——飞书画一张 CardKit 渐进卡片,让用户实时看到 thinking、tool call、text delta 一段一段落下来。
+
+两条路都汇到 `Gateway.invoke_stream`。生成回复的代码路径只有一条,不管源头在哪。这正是为什么 control plane(command)只要活在一个地方、session 存储只需要认识 `channel_id`、以后加 Slack 大体上只是渲染问题。
+
+## Channel——是传输,不是协议
+
+channel 是把用户消息从传输上捞下来、把 `SessionItem` 流推回去所需的最小胶水。`BaseChannel` 表面刻意做得几乎是空的——两个 `@final` 方法都只转发给 gateway。其它全是传输相关的:飞书事件订阅、Slack 事件校验、Discord gateway websocket。这些细节不该靠近 orchestrator。
+
+channel 的名字同时也是 session 路径里的 `channel_id`。这意味着飞书的 session 在 `~/.vulcan/sessions/feishu/` 下,HTTP API 的在 `~/.vulcan/sessions/gateway/` 下,两者永不冲突。详见 [为什么按 channel_id 作命名空间](/docs/explanation/message-flow#why-channel_id-is-the-namespace)。
+
+## Command——control plane
+
+`CommandManager`(`vulcan/gateway/commands/command_manager.py`)维护一个有序的 `BaseCommand` 列表,提供单一的 `match_command(text)`。如果消息以 `/` 开头、第一个 token 匹配某个注册过的命令,gateway 把它交过去,runtime 就不会被调。
+
+这是系统里**唯一**的短路。正因如此,`/switch claude-code`、`/sessions`、`/runtime` 在任何 channel 都能工作,而不用特判。一个 command 的 `exec` 返回一个 `ChatCompletion`,长得跟普通 assistant 回复一样(走 `system_completion` 包装),channel 按渲染 runtime 回复的方式原样渲染它,连渲染路径都不用分叉。
+
+命令是 control plane 是刻意的:它们不会被持久化到 session。如果会,一次会话重放就把所有 `/switch` 再跑一遍了。在 `invoke_stream` 的第 2 步之前短路,正是为了防止这一点。
+
+## Runtime——可互换的那部分
+
+runtime 单独有一页:[为什么是 agent runtime,不是 model](/docs/explanation/agent-runtimes)。从 orchestrator 的角度看,一句话版本:runtime 就是实现 `invoke(ctx) -> AsyncIterator[SessionItem]` 和 `is_installed() -> bool` 的类,gateway 不需要知道其它任何事。
+
+`RuntimeManager`(`vulcan/runtime/runtime_manager.py`)按已注册名字记三种状态——enabled / disabled / uninstalled——只提供一个查找方法 `get_runtime(name)`。它不持有"当前 runtime"这种概念;绑定是按 session 的,落在 session 的 sidecar meta 里。`/switch` 改写发命令那个 session 的 sidecar。因为 runtime 跨 turn 是无状态的(见 message-flow 页),切换是瞬时的——没有东西需要交接、序列化、重建。不同 session 可以同时跑在不同 runtime 上。
+
+## Session——transcript,不是 state
+
+session manager 持有系统里**唯一**的持久化状态:每对 `(channel_id, session_id)` 对应一份 JSONL 文件,位于 `~/.vulcan/sessions/<channel_id>/<session_id>.jsonl`,以及紧挨着的一份小 sidecar `<session_id>.meta.json`,装着这个 session 的 runtime 绑定。每一条 JSONL 行是一个 `SessionItem`——消息、tool call、tool output、reasoning 块。transcript 正常运行时只 append;sidecar 在重绑时被覆写。
+
+这是一个有主张的选择。其它方案——SQLite、结构化对象模型、厂商专有的对话存储——都更强大。JSONL 不更强大,它更**诚实**。你能 `cat` 一份 session 读出来,能 `grep` 跨所有 session,能用 `sed` 删一条糟糕的 turn,能 `cp -r` 备份目录。格式本身就是文档。
+
+`assembly_history_messages` 把 history 原样逐行拼接进 `<previous_conversations>...</previous_conversations>` 包裹里,整体作为一条 user-role `Message` 丢给 runtime。为什么这样做,是下一页的主题。
+
+## Gateway 不做什么
+
+几件 gateway 刻意不做的事情,延后它们是中心能保持精简的原因:
+
+- **不碰任何传输。** Starlette 在 `api_server/`,Lark SDK 在 `channels/feishu/`。gateway 只处理 `Message` 进、`SessionItem` 出。
+- **不了解 tool。** tool call 是 runtime 发出的事件,gateway 透传。存在哪些 tool、怎么跑、怎么沙箱——runtime 的事。
+- **不模板化 prompt。** 它把人格文本和 history 作为原料交给 runtime,每个 runtime 自己决定怎么注入(append 到 system、prepend 到 user……)。gateway 对"放什么进去"有意见,对"某一栈想怎么接收"没有意见。
+
+这些事每一件都是诱惑。抵抗它们,正是中心得以保持可读的原因。

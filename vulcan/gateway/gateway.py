@@ -1,15 +1,14 @@
 import shutil
 import time
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import uvicorn
 from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.conversations.message import Message
-from openai.types.responses.response_output_text import ResponseOutputText
 
 from ..api_server.app import VulcanAPIServer
 from ..runtime.runtime_manager import RuntimeManager
@@ -19,6 +18,7 @@ from ..types.gateway import GatewayConfig
 from ..types.invocation import InvocationContext
 from ..types.session import SessionItem
 from ..utils.logger import get_logger
+from ..utils.messages import assistant_message, message_text
 from .commands.command_manager import CommandManager
 
 logger = get_logger(__name__)
@@ -71,51 +71,45 @@ class Gateway:
         logger.info("gateway ready")
 
     def _register_runtimes(self):
-        from ..runtime import get_runtime_cls
+        from ..runtime import KNOWN_RUNTIMES
+        from ..types.gateway import ModelConfig
 
-        for runtime_name, runtime_config in self.config.runtimes.items():
-            if not runtime_config.enable:
-                logger.info(f"runtime disabled, skip: {runtime_name}")
-                continue
-
-            try:
-                runtime_cls = get_runtime_cls(runtime_name)
-            except ImportError as e:
-                logger.warning(
-                    f"runtime not installed, skip: {runtime_name} ({e})"
-                )
-                continue
-
-            runtime_instance = runtime_cls(
-                name=runtime_name,
-                agent_config=AgentConfig(
-                    instruction=Instruction(
-                        identity=self.identity_str,
-                        soul=self.soul_str,
-                        tool=self.tool_str,
-                    ),
-                    model=runtime_config.model,
-                ),
+        instruction = Instruction(
+            identity=self.identity_str,
+            soul=self.soul_str,
+            tool=self.tool_str,
+        )
+        for runtime_name, runtime_cls in KNOWN_RUNTIMES.items():
+            cfg = self.config.runtimes.get(runtime_name)
+            agent_config = AgentConfig(
+                instruction=instruction,
+                model=cfg.model if cfg is not None else ModelConfig(),
             )
-            self.runtime_manager.register_runtime(runtime_instance)
-            logger.info(
-                f"registered runtime: {runtime_name} ({runtime_cls.__name__})"
+            self.runtime_manager.register(
+                name=runtime_name,
+                cls=runtime_cls,
+                cfg=cfg,
+                agent_config=agent_config,
             )
 
     def _register_commands(self) -> None:
         from .commands.help.help import HelpCommand
+        from .commands.new.new import NewCommand
         from .commands.runtime.runtime import RuntimeCommand
         from .commands.session.session import SessionCommand
         from .commands.sessions.sessions import SessionsCommand
+        from .commands.status.status import StatusCommand
         from .commands.switch.switch import SwitchCommand
         from .commands.version.version import VersionCommand
 
         for cls in (
+            NewCommand,
             SwitchCommand,
             SessionsCommand,
             SessionCommand,
             RuntimeCommand,
             VersionCommand,
+            StatusCommand,
             HelpCommand,
         ):
             cmd = cls(gateway=self)
@@ -131,81 +125,70 @@ class Gateway:
                 continue
 
             channel_cls = get_channel_cls(channel_name)
-            default_runtime = self.runtime_manager.get_runtime(
-                channel_config.runtime
-            )
-            if not default_runtime:
-                logger.error(
-                    f"{channel_name}'s runtime {channel_config.runtime} not exist, skip init this channel"
-                )
-                continue
             channel_instance = channel_cls(
                 name=channel_name,
                 gateway=self,
-                default_runtime=default_runtime,
                 config=channel_config.config,
             )
             setattr(self, f"{channel_name}_channel", channel_instance)
-            logger.info(
-                f"registered channel: {channel_name} "
-                f"-> runtime={channel_config.runtime}"
-            )
+            logger.info(f"registered channel: {channel_name}")
 
     async def invoke_stream(
         self,
         channel_id: str,
         session_id: str,
         user_message: Message,
-        runtime_name: str | None = None,
     ) -> AsyncIterator[SessionItem]:
         """Run one turn end-to-end and yield SessionItem stream as runtime
         produces them (text, thinking, tool_call, tool_output, ...).
 
+        Runtime selection lives entirely on the session's meta sidecar —
+        `/switch` mutates it, and callers that want to rebind explicitly
+        (e.g. the API middleware forwarding a request's `"model"` field)
+        write it directly via `session_manager.set_session_runtime()`
+        before calling this. The gateway itself only reads.
+
         Channels use this to render progressively. The non-streaming
         `invoke()` wraps this and aggregates into a ChatCompletion.
         """
-        message_text = "".join(
-            getattr(c, "text", "") for c in user_message.content
-        )
+        user_text = message_text(user_message)
 
-        # 1. slash command match (control-plane, not saved to session)
-        command = self.command_manager.match_command(message_text)
+        # 1. slash command match (control-plane, not saved to session).
+        #    `/switch` mutates the session meta here and returns.
+        command = self.command_manager.match_command(user_text)
         if command:
             logger.info(f"command matched: /{command.command}")
-            completion = command.exec(command.parse_args(message_text))
-            cmd_text = completion.choices[0].message.content or ""
-            yield Message(
-                id=str(uuid.uuid4()),
-                type="message",
-                role="assistant",
-                status="completed",
-                content=[
-                    ResponseOutputText(
-                        type="output_text",
-                        text=cmd_text,
-                        annotations=[],
-                    )
-                ],
+            completion = command.exec(
+                command.parse_args(user_text), channel_id, session_id
             )
+            cmd_text = completion.choices[0].message.content or ""
+            yield assistant_message(cmd_text)
             return
 
-        # 2. assemble history BEFORE appending the current turn so it is
+        # 2. resolve runtime for this session and ensure it exists.
+        #    priority: session meta > config.default_runtime.
+        #    create_session is idempotent — touches the jsonl if missing
+        #    and (re)writes the meta sidecar.
+        resolved_name = (
+            self.session_manager.get_session_runtime(channel_id, session_id)
+            or self.config.default_runtime
+        )
+        self.session_manager.create_session(
+            channel_id, session_id, resolved_name
+        )
+        runtime = self.runtime_manager.get_runtime(resolved_name)
+        assert runtime is not None, f"runtime '{resolved_name}' is not enabled"
+
+        # 3. assemble history BEFORE appending the current turn so it is
         #    excluded from history_message.
         history_message = self.session_manager.assembly_history_messages(
             channel_id, session_id
         )
 
-        # 3. save current user message to session
+        # 4. save current user message to session
         self.session_manager.append_to_session(
             channel_id, session_id, user_message
         )
-
-        # 4. pick runtime
-        if runtime_name is not None:
-            runtime = self.runtime_manager.get_runtime(runtime_name)
-        else:
-            runtime = self.runtime_manager.curr_runtime
-        assert runtime is not None
 
         # 5. build invocation context — runtime sees two messages: a
         #    pre-rendered history + the current user input.
@@ -220,27 +203,13 @@ class Gateway:
         text_parts: list[str] = []
         async for item in runtime.invoke(ctx):
             if isinstance(item, Message) and item.role == "assistant":
-                for c in item.content:
-                    text_parts.append(getattr(c, "text", ""))
+                text_parts.append(message_text(item))
             yield item
 
         # 7. persist aggregated assistant message
         final_text = "".join(text_parts)
-        assistant_item = Message(
-            id=str(uuid.uuid4()),
-            type="message",
-            role="assistant",
-            status="completed",
-            content=[
-                ResponseOutputText(
-                    type="output_text",
-                    text=final_text,
-                    annotations=[],
-                )
-            ],
-        )
         self.session_manager.append_to_session(
-            channel_id, session_id, assistant_item
+            channel_id, session_id, assistant_message(final_text)
         )
         logger.info(f"runtime done: {runtime.name} reply_len={len(final_text)}")
 
@@ -249,18 +218,18 @@ class Gateway:
         channel_id: str,
         session_id: str,
         user_message: Message,
-        runtime_name: str | None = None,
     ) -> ChatCompletion:
         """Non-streaming convenience wrapper around invoke_stream — collects
         assistant text from yielded items into a single ChatCompletion."""
         text_parts: list[str] = []
-        model_name = runtime_name or (
-            self.runtime_manager.curr_runtime.name
-            if self.runtime_manager.curr_runtime
-            else "vulcan-system"
+        # The ChatCompletion.model label mirrors what invoke_stream picks:
+        # session meta > config.default_runtime.
+        model_name = (
+            self.session_manager.get_session_runtime(channel_id, session_id)
+            or self.config.default_runtime
         )
         async for item in self.invoke_stream(
-            channel_id, session_id, user_message, runtime_name
+            channel_id, session_id, user_message
         ):
             if isinstance(item, Message) and item.role == "assistant":
                 for c in item.content:

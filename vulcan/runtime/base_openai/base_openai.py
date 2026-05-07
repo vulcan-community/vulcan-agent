@@ -8,8 +8,7 @@ each text delta as a `Message` SessionItem. Subclass to:
 """
 
 import json
-import uuid
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from openai import AsyncOpenAI
 from openai.types.chat import (
@@ -19,11 +18,11 @@ from openai.types.chat import (
     ChatCompletionUserMessageParam,
 )
 from openai.types.conversations.message import Message
-from openai.types.responses.response_output_text import ResponseOutputText
 
 from ...types.agent import AgentConfig
 from ...types.invocation import InvocationContext
 from ...types.session import SessionItem
+from ...utils.messages import assistant_message, message_text
 from ..base_runtime import BaseRuntime
 
 
@@ -37,17 +36,39 @@ class BaseOpenAIRuntime(BaseRuntime):
         super().__init__(
             name=name, agent_config=agent_config, description=description
         )
-        cfg = agent_config.model
-        self.client = AsyncOpenAI(
-            api_key=cfg.api_key or None,
-            base_url=cfg.base_url or None,
-        )
+        # AsyncOpenAI validates api_key eagerly at construction, so defer
+        # it to first invoke() — otherwise registering base-openai without
+        # credentials (e.g. when it's just being probed for status) would
+        # crash.
+        self._client: AsyncOpenAI | None = None
+
+    def is_installed(self) -> bool:
+        # `openai` is a core dependency of vulcan, so this runtime is
+        # always available.
+        return True
+
+    @property
+    def client(self) -> AsyncOpenAI:
+        if self._client is None:
+            cfg = self.agent_config.model
+            self._client = AsyncOpenAI(
+                api_key=cfg.api_key or None,
+                base_url=cfg.base_url or None,
+            )
+        return self._client
 
     async def invoke(
         self, ctx: InvocationContext
     ) -> AsyncIterator[SessionItem]:
+        provider = self.agent_config.model.provider
+        if provider != "openai":
+            raise ValueError(
+                f"BaseOpenAIRuntime only supports provider='openai', but "
+                f"runtime '{self.name}' is configured with "
+                f"provider='{provider}'. Fix vulcan.json or use a "
+                f"different runtime."
+            )
         messages = self.build_messages(ctx)
-
         stream = await self.client.chat.completions.create(
             model=self.agent_config.model.name,
             messages=messages,
@@ -59,19 +80,7 @@ class BaseOpenAIRuntime(BaseRuntime):
             text = chunk.choices[0].delta.content
             if not text:
                 continue
-            yield Message(
-                id=str(uuid.uuid4()),
-                type="message",
-                role="assistant",
-                status="completed",
-                content=[
-                    ResponseOutputText(
-                        type="output_text",
-                        text=text,
-                        annotations=[],
-                    )
-                ],
-            )
+            yield assistant_message(text)
 
     def build_messages(
         self, ctx: InvocationContext
@@ -89,10 +98,7 @@ class BaseOpenAIRuntime(BaseRuntime):
         """
         messages: list[ChatCompletionMessageParam] = []
 
-        i = self.agent_config.instruction
-        system_text = "\n\n".join(
-            s for s in (i.identity, i.soul, i.tool) if s.strip()
-        )
+        system_text = self.agent_config.instruction.render()
         if system_text:
             messages.append(
                 ChatCompletionSystemMessageParam(
@@ -101,20 +107,18 @@ class BaseOpenAIRuntime(BaseRuntime):
             )
 
         messages.extend(self._split_history(ctx.history_message))
-
         messages.append(
             ChatCompletionUserMessageParam(
-                role="user", content=self._message_text(ctx.message)
+                role="user", content=message_text(ctx.message)
             )
         )
-
         return messages
 
     @staticmethod
     def _split_history(
         history_message: Message,
     ) -> list[ChatCompletionMessageParam]:
-        text = "".join(getattr(c, "text", "") for c in history_message.content)
+        text = message_text(history_message)
         if not text:
             return []
 
@@ -147,7 +151,3 @@ class BaseOpenAIRuntime(BaseRuntime):
                     )
                 )
         return out
-
-    @staticmethod
-    def _message_text(msg: Message) -> str:
-        return "".join(getattr(c, "text", "") for c in msg.content)

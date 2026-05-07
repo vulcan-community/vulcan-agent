@@ -1,0 +1,116 @@
+---
+title: 加一个新的 agent runtime
+description: 把一个新的 agent runtime(不是新的 LLM)接到 Vulcan。
+---
+
+你想让 Vulcan 派发到一个新的 agent runtime——一整套编排栈,不是"同一个 OpenAI 兼容端点换个 LLM"这种事(只要换 LLM 的话,配好 `base-openai` 或 `claude-code` 的 `base_url` / `api_key` 就行)。六步。
+
+## 1. 继承 `BaseRuntime`
+
+新建 `vulcan/runtime/<name>/<name>.py`。接口很小——一个同步判断,加一个异步流:
+
+```python
+# vulcan/runtime/my_runtime/my_runtime.py
+"""一个最小的 runtime,把 user prompt 原样回一遍。"""
+
+import importlib.util
+from collections.abc import AsyncIterator
+
+from ...types.invocation import InvocationContext
+from ...types.session import SessionItem
+from ...utils.messages import assistant_message, message_text
+from ..base_runtime import BaseRuntime
+
+
+class MyRuntime(BaseRuntime):
+    def is_installed(self) -> bool:
+        # optional SDK import 得进来才算"已安装"。
+        return importlib.util.find_spec("my_sdk") is not None
+
+    async def invoke(
+        self, ctx: InvocationContext
+    ) -> AsyncIterator[SessionItem]:
+        # SDK import 延迟到方法里,my_sdk 没装的时候这个模块也能 load。
+        import my_sdk
+
+        persona = self.agent_config.instruction.render()
+        history = message_text(ctx.history_message)
+        prompt = message_text(ctx.message)
+
+        client = my_sdk.Client(
+            api_key=self.agent_config.model.api_key or None,
+            base_url=self.agent_config.model.base_url or None,
+        )
+        async for chunk in client.stream(persona, history, prompt):
+            yield assistant_message(chunk.text)
+```
+
+`InvocationContext` 三个字段(见 `vulcan/types/invocation.py:5-8`):
+
+- `channel_id`——这一轮是哪个 channel 派过来的。
+- `history_message`——一个预先渲染好的 `user` 角色 `Message`,装着之前的对话。有的 runtime(`BaseOpenAIRuntime`)会把它重新拆成一条条 turn;简单点的直接把它拼到 prompt 里(`CodexRuntime` 就这么干的)。
+- `message`——当前这条 user 输入。
+
+## 2. Optional SDK 的 import 延迟掉
+
+SDK import 放在方法体里,别放模块顶层。`__init__.py` 启动时就把每个 runtime 类都 import 进来,`is_installed()` 才能报状态;对没装你这个 extra 的用户,这个模块也得能 load。`CodexRuntime` 就是这个套路——判断用 `importlib.util.find_spec`,真的 import 放在 `invoke` / helper 里。
+
+## 3. 用 message 工厂
+
+别手搓 `Message` 或者 `ResponseReasoningItem`——`vulcan/utils/messages.py` 有每个 runtime 共用的工厂:
+
+- `assistant_message(text)`——流式文本增量;
+- `reasoning_item(text)`——思考 / chain of thought;
+- `tool_call_item(call_id, name, arguments)`——工具调用;
+- `tool_output_item(call_id, output, is_error=False)`——工具返回,和上面用同一个 `call_id` 配对。
+
+每个 channel 对这几种的渲染不一样(比如飞书把 `reasoning_item` 渲成引用块,把 tool call / output 按 `call_id` 配对塞进一个折叠面板)。选对工厂,每个 channel 都能把你的输出渲染对。
+
+## 4. 把名字注册上
+
+在 `vulcan/runtime/__init__.py` 里 import 你的类,加进 `KNOWN_RUNTIMES`:
+
+```python
+from .my_runtime.my_runtime import MyRuntime
+
+KNOWN_RUNTIMES: dict[str, type[BaseRuntime]] = {
+    "base-openai": BaseOpenAIRuntime,
+    "claude-code": ClaudeCodeRuntime,
+    "codex": CodexRuntime,
+    "my-runtime": MyRuntime,
+}
+```
+
+Gateway 启动时会扫一遍 `KNOWN_RUNTIMES`,把每个类都 instantiate 一下,通过 `RuntimeManager.register` 把状态记成 `enabled` / `disabled` / `uninstalled`(见 `vulcan/runtime/runtime_manager.py:23-57`)。
+
+## 5. 声明 optional extra
+
+`pyproject.toml` 的 `[project.optional-dependencies]` 里加上你的 SDK:
+
+```toml
+[project.optional-dependencies]
+my-runtime = ["my-sdk>=1.0.0"]
+```
+
+用户 `uv sync --extra my-runtime` 装。
+
+## 6. 用户在 `vulcan.json` 里启用
+
+```json
+{
+  "runtimes": {
+    "my-runtime": {
+      "enable": true,
+      "model": {
+        "name": "",
+        "base_url": "",
+        "api_key": ""
+      }
+    }
+  }
+}
+```
+
+重启。在任意 channel 发 `/runtime` 就能看到 `my-runtime` 是 `enabled`。用户**按 session** 选用 —— `/switch my-runtime` 重绑当前对话,或者 API 调用方传 `"model": "my-runtime"`(middleware 会把它落进 session 的 meta sidecar)。其它 session 保持自己的绑定。想把你的 runtime 设为新 session 的回落值,就把 `vulcan.json` 顶层改成 `"default_runtime": "my-runtime"`。
+
+`history_message` 和 `message` 的语义、gateway 怎么从 session 日志里把它们拼出来——见 [消息流](/docs/explanation/message-flow)。

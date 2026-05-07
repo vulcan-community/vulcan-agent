@@ -15,7 +15,6 @@ from openai.types.responses.response_function_tool_call_output_item import (
 from openai.types.responses.response_input_text import ResponseInputText
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
-from ....runtime.base_runtime import BaseRuntime
 from ....utils.logger import get_logger
 from ...gateway import Gateway
 from ..base_channel import BaseChannel
@@ -33,13 +32,11 @@ class FeishuChannel(BaseChannel):
         self,
         name: str,
         gateway: "Gateway",
-        default_runtime: "BaseRuntime",
         config: dict = {},
     ) -> None:
         super().__init__(
             name=name,
             gateway=gateway,
-            default_runtime=default_runtime,
             config=config,
         )
         self.app_id: str = config["app_id"]

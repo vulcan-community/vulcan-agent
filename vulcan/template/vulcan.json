@@ -1,5 +1,6 @@
 {
     "version": "0.1",
+    "default_runtime": "base-openai",
     "runtimes": {
         "base-openai": {
             "enable": false,
@@ -10,6 +11,14 @@
             }
         },
         "claude-code": {
+            "enable": false,
+            "model": {
+                "model": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        },
+        "codex": {
             "enable": false,
             "model": {
                 "model": "",

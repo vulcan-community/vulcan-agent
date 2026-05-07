@@ -1,0 +1,83 @@
+---
+title: Why agent runtimes, not models
+description: Vulcan dispatches between full agent stacks, not between LLM weights. This page explains the distinction and why it matters.
+---
+
+Vulcan is a dispatch layer for pluggable **agent runtimes**. That framing is deliberate, and it is the thing that separates Vulcan from the family of tools it superficially resembles.
+
+## The narrower problem Vulcan doesn't solve
+
+LiteLLM, OpenRouter, and similar proxies solve a real problem: the OpenAI Chat Completions surface has become a lingua franca, but the weights behind it come from many vendors with incompatible wire formats. A model router normalises those back to one API shape. Same API in, same API out, different weights in the middle.
+
+Vulcan sits one layer above that. Model routing, if you want it, can live *inside* a single Vulcan runtime — `BaseOpenAIRuntime` is exactly that shape, and you can point it at LiteLLM if you like. But the unit Vulcan dispatches between isn't a set of weights. It's a whole orchestration stack.
+
+## What an agent runtime actually is
+
+An agent runtime is everything that sits between a user prompt and a response when an LLM is allowed to *do* things: read files, edit code, run shell commands, call MCP tools, search the web, think in a reasoning buffer before replying. The LLM is one piece of that. The tool surface, the sandbox, the reasoning loop, and the prompt-construction conventions are the rest.
+
+Three runtimes ship today, and they differ on all four axes:
+
+| Axis                 | Claude Code                                  | Codex                                                   | Base OpenAI                      |
+| -------------------- | -------------------------------------------- | ------------------------------------------------------- | -------------------------------- |
+| **Tool surface**     | file read/edit, shell, MCP, native thinking  | shell, file edits, MCP, web search                      | none (plain Chat Completions)    |
+| **Sandbox**          | process-local, inherits cwd                  | `workspace-write`, `skip_git_repo_check=True`           | n/a                              |
+| **Reasoning**        | built-in thinking, `max_thinking_tokens`     | emits `ReasoningItem` events                            | text only                        |
+| **Persona delivery** | system-prompt `append` to the `claude_code` preset | prepended into the user prompt (no system slot)   | system message                   |
+
+Look at `ClaudeCodeRuntime.invoke` in `vulcan/runtime/claude_code/claude_code.py`: the persona arrives as `system_prompt={"type": "preset", "preset": "claude_code", "append": ...}`. The runtime is layering Vulcan's identity on top of Anthropic's `claude_code` behavioural preset — it isn't replacing Claude Code's system prompt, it's extending it. `CodexRuntime` in `vulcan/runtime/codex/codex.py` can't do that, because the Codex SDK exposes no system-prompt slot at all; the persona gets joined with the history and the user turn into one prompt string. `BaseOpenAIRuntime` has a real `role="system"` slot and uses it.
+
+These aren't cosmetic differences. They change what's possible. A runtime that can edit files and run shell commands belongs to a different problem class than one that can only generate text. Treating them as interchangeable "models" would paper over the thing that matters.
+
+## The runtime interface is deliberately small
+
+`vulcan/runtime/base_runtime.py` is 25 lines. A runtime must implement two methods:
+
+```python
+class BaseRuntime(ABC):
+    @abstractmethod
+    def invoke(self, ctx: InvocationContext) -> AsyncIterator[SessionItem]: ...
+
+    @abstractmethod
+    def is_installed(self) -> bool: ...
+```
+
+That's it. Given a context (channel id, pre-rendered history, current user message), yield a stream of `SessionItem`s — text, reasoning, tool calls, tool outputs. Everything else — session storage, channel rendering, slash commands, persona loading — is the gateway's job.
+
+This matters for two reasons. First, adding a new runtime is cheap: Google ADK, when it lands, becomes a fourth entry in `KNOWN_RUNTIMES` in `vulcan/runtime/__init__.py` plus one class that knows how to drive the ADK SDK and translate its events into `SessionItem`s. Second, it forces a useful discipline — a runtime never touches the session store, never handles commands, never worries about rendering. It does one thing: turn a prompt into an event stream.
+
+## Why `is_installed()` is an instance method
+
+It looks redundant. Class-level metadata would be simpler. But installation isn't always a Python-level question.
+
+- Claude Code checks `importlib.util.find_spec("claude_agent_sdk")` — the SDK is an optional dep.
+- Codex does the same for `openai_codex_sdk`, but the SDK itself wraps a `codex` CLI binary that must be separately provisioned (`codex login`). A future revision could probe for the binary here.
+- Base OpenAI is always installed — `openai` is a core dep — so it returns `True` unconditionally.
+
+The probe has to happen with the instance in hand, after `__init__` runs but before the SDK is actually needed. The constructors are cheap on purpose: they don't import the SDK (those imports are deferred into `invoke`). So `RuntimeManager.register` in `vulcan/runtime/runtime_manager.py` can instantiate every known runtime, ask each one whether it's installed, and record the answer — without ever crashing because an optional dep is missing.
+
+## The three-state status model
+
+A runtime is in exactly one of three states:
+
+- **enabled** — installed and marked `enable: true` in `vulcan.json`. Lives in `RuntimeManager._runtimes`, can serve traffic.
+- **disabled** — installed, but `enable: false` (or missing from config). Known to exist, not active.
+- **uninstalled** — optional SDK isn't importable. Not the user's fault; not a bug; just the shape of reality.
+
+Collapsing **disabled** and **uninstalled** into one state would be a mistake. They have different fixes: enabling a disabled runtime is a config edit; enabling an uninstalled one means `uv sync --extra claude-code` or `codex login`. `/runtime` surfaces both, distinctly, so the user knows which lever to pull. See [reference/commands](/docs/reference/commands) for the exact output.
+
+## What the next runtime looks like
+
+When Google ADK lands, it will look like this:
+
+1. A new module under `vulcan/runtime/google_adk/`.
+2. A subclass of `BaseRuntime` whose `is_installed()` probes `google.adk` (deferred import), whose `invoke()` builds an ADK agent with the persona injected the way ADK wants it (session service + system instruction), runs it against the gateway-prepared prompt, and yields `SessionItem`s as events arrive.
+3. One line added to `KNOWN_RUNTIMES` in `vulcan/runtime/__init__.py`.
+4. A `google-adk` key in the sample `vulcan.json`.
+
+No gateway changes. No channel changes. No session changes. The fact that that's the full list is the whole point.
+
+## Where model routing fits
+
+If you want classical model routing — talk to Claude on Monday, DeepSeek on Tuesday, through one Chat Completions endpoint — the right place is inside `BaseOpenAIRuntime`. Override `build_messages` to inject your own structure; point `base_url` at LiteLLM or OpenRouter; let them handle the per-provider translation. Vulcan doesn't compete with those tools. It composes with them.
+
+The distinction worth keeping in your head: Vulcan dispatches between *agents* that happen to use *models*. Model routers dispatch between *models*. Both are useful. They are not the same thing.

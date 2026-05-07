@@ -1,0 +1,64 @@
+---
+title: 接入飞书
+description: 让 Vulcan 在飞书(Lark)里回消息。
+---
+
+你想让 Vulcan 回复发给飞书机器人的消息。四步搞定。
+
+## 1. 建一个自建应用
+
+去 [飞书开放平台](https://open.feishu.cn/app) 建一个自建应用。开启机器人能力,至少授予 `im:message` 和 `im:message:send_as_bot` 权限,复制它的 `app_id`(形如 `cli_...`)和 `app_secret`。
+
+不需要配 webhook URL——channel 从 Vulcan 主动拉一条长连接 WebSocket 到飞书。
+
+## 2. 装一下 optional extra
+
+```bash
+uv sync --extra feishu
+```
+
+这会拉 `lark-oapi`,channel 用它来收事件和调 CardKit。
+
+## 3. 在 `vulcan.json` 里加上 channel
+
+打开 `~/.vulcan/vulcan.json`,在 `channels` 下加一段 `feishu`:
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "enable": true,
+      "config": {
+        "app_id": "cli_...",
+        "app_secret": "..."
+      }
+    }
+  }
+}
+```
+
+Channel 自己不再带 runtime 字段 —— runtime 是按 session 选的。新起的飞书 session 用 `config.default_runtime`（`vulcan.json` 顶层的字段），在任一聊天里发 `/switch <name>` 只会重绑当前这个 session。
+
+## 4. 重启,然后 @ 它
+
+重启 Vulcan。Gateway 会拉起 channel,开一条后台线程跑 WebSocket,日志里会打出 `feishu channel 'feishu' listening`。
+
+把 bot 拉进群,@ 它发消息。Vulcan 会:
+
+- 在你那条消息上点一个表情回应,告诉你收到了;
+- 开一张 CardKit 卡片,runtime 一边流一边把卡片刷新掉;
+- 助手文本直接写在卡片里,reasoning 用引用块,每一次工具调用落一个折叠面板,标题是工具名,里面放参数和结果。
+
+你一条消息触发的全部内容就在这一张卡片里。
+
+## 排查
+
+**@ 了 bot 没反应。** 去 gateway 日志里搜 `feishu channel '...' listening`。没打出来就是 `feishu` extra 没装,或者配置里 `enable` 是 false。
+
+**卡片出来了但里面一直空。** Channel 起来了,但 runtime 回不了。各个 agent runtime 有自己的前置条件:
+
+- `claude-code` 需要 `claude` CLI 已登录,或者在 `runtimes.claude-code.model` 下填好 `api_key` / `base_url`——见 [runtime 参考](/docs/reference/runtimes);
+- `codex` 需要先跑一次 `codex login`(或者在 Python 里 `Codex.install(...)`)把 CLI 和 auth 准备好;
+- `base-openai` 需要填 `api_key` 和 `base_url`。
+
+在任意 channel 发 `/runtime` 就能看到每个 runtime 是 `enabled` / `uninstalled` / `disabled`。

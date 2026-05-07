@@ -1,0 +1,101 @@
+---
+title: Agent runtimes
+description: Built-in agent runtimes, their registry names, and the capabilities each surfaces.
+---
+
+An **agent runtime** is a full orchestration stack driven by the gateway. Runtimes are registered by name; `Gateway._register_runtimes` iterates `KNOWN_RUNTIMES` and probes each one. The `RuntimeManager.status` map records the outcome per name.
+
+## Registry
+
+| Registry name  | Class               | Optional extra              |
+| -------------- | ------------------- | --------------------------- |
+| `base-openai`  | `BaseOpenAIRuntime` | — (bundled, always present) |
+| `claude-code`  | `ClaudeCodeRuntime` | `claude-code`               |
+| `codex`        | `CodexRuntime`      | `codex`                     |
+
+Install an optional extra with `uv sync --extra <name>`.
+
+## Status
+
+`/runtime` reports one of three states per name in `KNOWN_RUNTIMES`:
+
+| Status        | Condition                                                                 |
+| ------------- | ------------------------------------------------------------------------- |
+| `enabled`     | The runtime's `is_installed()` returns `True` **and** `vulcan.json` contains a `runtimes.<name>` block with `enable: true`. The runtime is live in `RuntimeManager._runtimes`. |
+| `disabled`    | `is_installed()` returns `True` but the name is absent from `vulcan.json` or its `enable` is `false`. |
+| `uninstalled` | The optional SDK dependency is not importable. Probed by `importlib.util.find_spec(...)`. |
+
+"Current" is a **per-session** notion — each session's binding lives in its own `.meta.json` sidecar. There is no global `curr_runtime` on the `RuntimeManager`. A fresh session with no binding falls back to `config.default_runtime`; `/switch` or the API's `"model"` field rebinds just that session.
+
+## `base-openai`
+
+OpenAI-compatible Chat Completions runtime.
+
+| Property                 | Value                                                                                              |
+| ------------------------ | -------------------------------------------------------------------------------------------------- |
+| `is_installed()`         | Always `True` (`openai` is a core dependency).                                                     |
+| SDK client               | `openai.AsyncOpenAI`, constructed lazily on first `invoke` using `ModelConfig.api_key` + `base_url`. |
+| Default `base_url`       | `https://ark.cn-beijing.volces.com/api/v3/chat/completions` (from `ModelConfig` default).         |
+| Streaming                | `stream=True` chat completions; text deltas only.                                                  |
+| SessionItem yielded      | `Message` (assistant, text).                                                                       |
+| Tool calls               | Not surfaced.                                                                                      |
+| Reasoning / thinking     | Not surfaced.                                                                                      |
+| Persona injection        | Rendered from `Instruction` and sent as a leading `system` message.                                |
+| History                  | Gateway-rendered history is parsed back into per-turn `user` / `assistant` chat messages.          |
+
+### base-openai gotchas
+
+- Rejects any `provider` other than `"openai"`. `invoke()` raises `ValueError` naming the runtime and the configured provider. Other providers (`"anthropic"` for Claude, etc.) belong with their own runtime (`claude-code`, `codex`) — the separation is intentional because those runtimes inject personas and stream tool events differently.
+
+## `claude-code`
+
+Wraps the official `claude-agent-sdk` (`ClaudeSDKClient`).
+
+| Property                 | Value                                                                                              |
+| ------------------------ | -------------------------------------------------------------------------------------------------- |
+| `is_installed()`         | `importlib.util.find_spec("claude_agent_sdk") is not None`.                                        |
+| SDK options              | `ClaudeAgentOptions(model=..., env=..., setting_sources=..., max_thinking_tokens=4000, system_prompt={"type": "preset", "preset": "claude_code", "append": <persona>})`. |
+| Model                    | `ModelConfig.name` → `ClaudeAgentOptions.model` (or `None` when empty).                            |
+| Credentials              | When `api_key` / `base_url` are set, they are injected as `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` environment entries. |
+| Setting sources          | `setting_sources=[]` **when `api_key` is supplied** — isolates from local `claude` CLI auth. When no api_key is supplied, `setting_sources=None` (SDK default: inherits local auth). |
+| Persona injection        | Appended to the built-in `claude_code` preset system prompt.                                       |
+| SessionItems yielded     | `Message` (assistant text), reasoning, function_call (tool use), function_call_output (tool result). |
+| Block mapping            | `TextBlock` → assistant message; `ThinkingBlock` → reasoning; `ToolUseBlock` → tool call; `ToolResultBlock` → tool output. |
+
+## `codex`
+
+Wraps `openai-codex-sdk`, which itself wraps the bundled `codex` CLI binary over stdio JSONL.
+
+| Property                 | Value                                                                                              |
+| ------------------------ | -------------------------------------------------------------------------------------------------- |
+| `is_installed()`         | `importlib.util.find_spec("openai_codex_sdk") is not None`.                                        |
+| CLI dependency           | Requires the `codex` CLI binary on PATH. Provision via `codex login` or `Codex.install(...)`.      |
+| SDK construction         | `Codex({"api_key": ..., "base_url": ...})`.                                                        |
+| Thread options           | `model`, `skip_git_repo_check=True`, `sandbox_mode="workspace-write"`, `approval_policy="never"`.  |
+| System-prompt slot       | None — persona is prepended to the prompt text, then history, then current input, joined by `\n\n`. |
+| Streaming                | `thread.run_streamed(prompt)`; text / reasoning items arrive as full-buffer updates, so the runtime computes deltas per `item.id` via `seen_len`. |
+| SessionItems yielded     | `Message` (assistant), reasoning, function_call (shell / MCP / web_search / file_change), function_call_output. |
+| Event mapping            | `AgentMessageItem` → assistant message; `ReasoningItem` → reasoning; `CommandExecutionItem` → `shell` tool call + output; `McpToolCallItem` → `<server>.<tool>` tool call + output; `WebSearchItem` → `web_search` tool call + output; `FileChangeItem` → `file_change` tool call + output (paired at completion); `ErrorItem` → assistant message prefixed `[codex error]`. |
+
+### Codex gotchas
+
+- `sandbox_mode="workspace-write"` grants filesystem writes inside the workspace. Run Vulcan from a directory you intend Codex to touch.
+- `approval_policy="never"` prevents the CLI from blocking on confirmation prompts. Vulcan runs non-interactively.
+- `skip_git_repo_check=True` allows operation outside a git repository.
+
+## `is_installed()`
+
+Every concrete runtime implements `is_installed() -> bool`. The base class stores no static import of the optional SDK; imports are deferred into `invoke()` so the module loads regardless.
+
+## SessionItem surface
+
+`SessionItem` is `openai.types.conversations.ConversationItem` — a discriminated union by `type`:
+
+| `type`                   | Produced by           | Meaning                    |
+| ------------------------ | --------------------- | -------------------------- |
+| `message`                | all runtimes          | Assistant text content.    |
+| `reasoning`              | claude-code, codex    | Model thinking blocks.     |
+| `function_call`          | claude-code, codex    | Tool invocation.           |
+| `function_call_output`   | claude-code, codex    | Tool result.               |
+
+`base-openai` only yields `message`.

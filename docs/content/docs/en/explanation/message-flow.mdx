@@ -1,0 +1,92 @@
+---
+title: Message flow and stateless runtimes
+description: Why each runtime turn is a fresh invocation with pre-rendered history, and why that decision quietly makes everything else easier.
+---
+
+One decision underwrites most of Vulcan's design: runtimes are **stateless per turn**. Each invocation receives a freshly-built `InvocationContext` containing the prior transcript and the new user message, produces a stream of events, and returns. The runtime keeps no memory between calls. The gateway keeps no memory other than what's on disk.
+
+This page walks the consequences.
+
+## What the runtime sees
+
+`InvocationContext` (`vulcan/types/invocation.py`) has three fields:
+
+```python
+class InvocationContext(BaseModel):
+    channel_id: str
+    history_message: Message
+    message: Message
+```
+
+That is the entire input to `runtime.invoke(ctx)`. The runtime does not get a session handle, a cursor, a database connection, or any way to mutate state. It gets two `Message` objects, both of role `user`:
+
+- `message` — the current turn.
+- `history_message` — everything that came before, pre-rendered by the gateway into a single user-role message whose text is wrapped in `<previous_conversations>...</previous_conversations>`.
+
+The wrapper contains the raw JSONL of every prior `SessionItem`, one per line, verbatim. Not re-serialised, not re-shaped, not filtered. Read `LocalSessionManager.assembly_history_messages` (`vulcan/session/local_session_manager.py`) — it is ten lines of file-read and string-concatenation.
+
+## Why raw JSONL, instead of re-rendered turns
+
+A tempting alternative is to translate history into each runtime's native format — Chat Completions messages for Base OpenAI, a prior-turns list for Codex, a Claude-native block structure for Claude Code. The gateway would know about every runtime, every runtime would get exactly the shape it wants, and the adapters would be thinner.
+
+Vulcan does the opposite. The gateway renders history once, as a blob. Each runtime decides what to do with it.
+
+The reason comes down to who knows what. The *gateway* knows the canonical transcript shape — it wrote it. It does not know the runtime's preferred rendering, and it shouldn't: that's a runtime-level concern that changes when you add a new runtime. The *runtime* knows what it can consume. If it wants to replay the transcript as real multi-turn (Base OpenAI does), it can parse the blob back out. If the SDK gives it no good way to do that (Codex has no system slot and takes one prompt string), it prepends the blob into the prompt and lets the model use its own context-handling. If it has native context management (Claude Code pushes the blob before the current turn), likewise.
+
+Three runtimes, three different strategies, and the gateway is oblivious to all of them. That is the payoff.
+
+You can see each strategy in code:
+
+- `BaseOpenAIRuntime._split_history` in `vulcan/runtime/base_openai/base_openai.py` strips the wrapper, walks the JSONL, and emits `ChatCompletionUserMessageParam` / `ChatCompletionAssistantMessageParam` entries. It drops items it doesn't handle (tool calls, reasoning) because plain Chat Completions can't represent them.
+- `ClaudeCodeRuntime.invoke` in `vulcan/runtime/claude_code/claude_code.py` joins `history_text` and `current_text` with two newlines and sends the concatenation via `client.query(...)`. Claude Code's own context system takes it from there.
+- `CodexRuntime.invoke` in `vulcan/runtime/codex/codex.py` joins `persona`, `history_text`, and `current_text` into one prompt string and hands it to `thread.run_streamed(prompt)`. Codex has no system-prompt slot, so the persona lives inline with the rest.
+
+Three strategies, one input shape, zero gateway churn when a fourth lands.
+
+## What gets persisted, what doesn't
+
+Step 3 of `Gateway.invoke_stream` assembles history *before* step 4 writes the current user message. This is not just ordering discipline — it's how the runtime's input stays clean. The history it sees never contains the message it is about to answer.
+
+Step 6 forwards every `SessionItem` the runtime emits straight to the caller for streaming, but step 7 persists only one line to the transcript: the aggregated assistant text, as a single `Message`. Tool calls, tool outputs, and reasoning blocks are *visible live* to the channel but are not written to the session file.
+
+This is deliberate, and it's a trade-off worth naming. Replaying a past conversation won't recreate the tool-use traces. On the other hand, the transcript stays compact, portable, and human-readable — you can read a session and see what the user asked and what the agent said, without wading through `shell` invocations. For agent-heavy runtimes this is a real loss; it may grow a configuration knob later. For now, the simpler default is the right one.
+
+(One small inconsistency: the assistant text is written as a fresh `Message` in step 7, but the gateway also yields the same text progressively during step 6. Channels that also feed items into a transcript-of-their-own should consume step 7's aggregated message or dedupe — see the channel implementations for examples.)
+
+## Why `/switch` is trivial
+
+Because runtimes hold no state between turns, switching them has nothing to hand off.
+
+Runtime binding lives on the session itself — in a sidecar `<session_id>.meta.json` next to the JSONL transcript. `SwitchCommand` writes the new name to that file via `session_manager.set_session_runtime(channel_id, session_id, name)` and returns. Next time `Gateway.invoke_stream` runs step 2, it reads the meta and resolves the new runtime. The new runtime reads the same `<previous_conversations>` blob — which contains the previous runtime's replies as plain message lines, indistinguishable from any other message — and continues the conversation. Other sessions keep their own bindings; `/switch` is strictly a per-session operation.
+
+Three entry points can write the binding:
+
+- `/switch <name>` — explicit rebind from inside a conversation.
+- The API middleware — when an HTTP request's `"model"` field is non-empty, it's persisted before the gateway is called. An API request is effectively an implicit `/switch`.
+- The gateway itself — on a fresh session with no prior binding, step 2 writes `config.default_runtime` so the session always has a runtime from the first real message onward.
+
+Compare this to what switching would look like if runtimes carried session state: you'd need a serialisation contract per runtime, a migration path for mismatched schemas, handling for mid-tool-call switches, and a way to tell the new runtime that the assistant turns in history came from a different stack. By making runtimes stateless and making the binding a piece of session-level metadata, none of that exists.
+
+The cost is that each turn pays the setup cost (building the SDK client, re-injecting the persona). For interactive agent workloads that cost is dominated by the LLM call itself, so it's not usually visible.
+
+## Why `channel_id` is the namespace
+
+Sessions are keyed by `(channel_id, session_id)`, not by `(user_id, session_id)`. The reasoning is about *where* a conversation lives, not *who* owns it.
+
+- The HTTP API uses `channel_id = "gateway"` (the `GATEWAY_CHANNEL_ID` constant). Session ids come from the `x-session-id` header — the caller chooses them.
+- Feishu uses `channel_id = "feishu"` and picks a session id per chat or per user as it sees fit.
+- A future Slack channel will use `channel_id = "slack"` and decide its own scheme.
+
+Each inbound transport gets its own namespace. A Feishu session with id `default` and an HTTP session with id `default` are separate files in separate directories. This is the right granularity because the *transport* is what determines how users identify themselves and how sessions relate to external conversations. Binding to `user_id` would require each channel to know about a global user system; binding to `channel_id` lets each channel define its own sense of identity.
+
+This also means Vulcan is single-tenant-per-channel today. A multi-user Feishu deployment would need the Feishu channel to namespace session ids by the Lark `open_id`. That's a channel-level change, not a gateway-level one.
+
+## The shape of an event stream
+
+A `SessionItem` is one of a small set of shapes: an assistant `Message`, a `ResponseReasoningItem`, a `ResponseFunctionToolCall`, or a `ResponseFunctionToolCallOutput`. Runtimes emit them as events arrive; the gateway passes them through unchanged.
+
+Channels then decide what to render. Feishu's CardKit card shows all four kinds. The HTTP API folds them down — only assistant text makes it into the `ChatCompletion` response, because `ChatCompletion` has nowhere to put reasoning or tool traces. That's the price of speaking a pre-agentic API shape, and it's fine: if you want the full stream, use a channel.
+
+## The through-line
+
+The common thread is that state lives in one place (the JSONL file), is rendered into one shape (the `<previous_conversations>` blob), and is handed to stateless components that each do one thing. That's not a profound architectural insight. It is, however, the reason the codebase is small, and the reason new runtimes and new channels drop in without disturbing anything else.

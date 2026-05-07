@@ -1,0 +1,83 @@
+---
+title: 为什么是 agent runtime,不是 model
+description: Vulcan 调度的是完整的 agent 栈,不是 LLM 权重。这一页解释这个区别,以及它为什么重要。
+---
+
+Vulcan 是一层面向可插拔 **agent runtime** 的调度层。这个措辞是刻意的,也是 Vulcan 和一类表面相似的工具真正的分界线。
+
+## Vulcan 不解决的那个更窄的问题
+
+LiteLLM、OpenRouter 这类 proxy 解决的是一个真实的问题:OpenAI Chat Completions 这套接口已经成了事实标准,但背后的权重来自一堆厂商,wire format 互不兼容。model router 把它们归一到同一个 API shape,进去是 Chat Completions,出来是 Chat Completions,中间换的是权重。
+
+Vulcan 比这高一层。model routing 如果你需要,完全可以塞在 Vulcan 某一个 runtime 里——`BaseOpenAIRuntime` 就是这个形状,你把 `base_url` 指向 LiteLLM 就行。但 Vulcan 调度的基本单位不是一组权重,而是一整套 orchestration 栈。
+
+## 一个 agent runtime 究竟是什么
+
+一个 agent runtime 包含了从用户 prompt 到回复之间的全部东西——前提是这个 LLM 被允许做事:读文件、改代码、跑 shell、调 MCP tool、搜网、在 reasoning buffer 里先想再答。LLM 只是其中一块,tool 表面、sandbox、reasoning loop、prompt 拼装惯例是剩下的。
+
+目前内置三个 runtime,在上述四个维度上各不相同:
+
+| 维度             | Claude Code                                      | Codex                                                  | Base OpenAI                  |
+| ---------------- | ------------------------------------------------ | ------------------------------------------------------ | ---------------------------- |
+| **Tool 表面**    | 文件读写、shell、MCP、原生 thinking              | shell、文件改动、MCP、web search                       | 无(纯 Chat Completions)    |
+| **Sandbox**      | 进程本地,继承 cwd                                | `workspace-write`、`skip_git_repo_check=True`           | 不适用                       |
+| **Reasoning**    | 内置 thinking,`max_thinking_tokens`             | 发出 `ReasoningItem` 事件                               | 只有文本                     |
+| **人格注入**     | 追加到 `claude_code` preset 的 system prompt     | 拼到 user prompt 前面(没有 system 槽位)              | 走 system 消息               |
+
+看一眼 `vulcan/runtime/claude_code/claude_code.py` 里的 `ClaudeCodeRuntime.invoke`:人格是这样进去的——`system_prompt={"type": "preset", "preset": "claude_code", "append": ...}`。runtime 是把 Vulcan 的身份设定**叠加**在 Anthropic 官方 `claude_code` 行为 preset 之上的,不是替换,是延伸。`vulcan/runtime/codex/codex.py` 里的 `CodexRuntime` 做不了这件事——Codex SDK 根本就没暴露 system-prompt 槽位,人格只能跟 history 和当前 turn 拼成一整条 prompt 字符串。`BaseOpenAIRuntime` 则有真正的 `role="system"` 槽位,直接用。
+
+这不是表面差别。它改变了**能做什么**。一个能编辑文件、跑 shell 的 runtime 和一个只能生成文本的 runtime 属于不同问题类别,把它们当"可互换的 model"处理,恰恰掩盖了最重要的那个维度。
+
+## runtime 接口刻意做得很小
+
+`vulcan/runtime/base_runtime.py` 全文 25 行。一个 runtime 只需要实现两个方法:
+
+```python
+class BaseRuntime(ABC):
+    @abstractmethod
+    def invoke(self, ctx: InvocationContext) -> AsyncIterator[SessionItem]: ...
+
+    @abstractmethod
+    def is_installed(self) -> bool: ...
+```
+
+就这些。给定一个 context(channel id、预渲染好的 history、当前用户消息),吐一串 `SessionItem`——text、reasoning、tool call、tool output。其它所有事情——session 存储、channel 渲染、slash command、人格加载——都是 gateway 的活。
+
+这带来两点好处。第一,加新 runtime 很便宜:Google ADK 落地时,就是在 `vulcan/runtime/__init__.py` 的 `KNOWN_RUNTIMES` 里多一行、加一个知道怎么驱动 ADK SDK 并把事件翻译成 `SessionItem` 的类而已。第二,它强制了一种有用的纪律——runtime 绝不碰 session 存储、不处理 command、不操心渲染,只做一件事:把 prompt 变成事件流。
+
+## 为什么 `is_installed()` 是实例方法
+
+看着是冗余的。class 级元数据更简单。但"是否安装"并不总是一个 Python 层面的问题。
+
+- Claude Code 用 `importlib.util.find_spec("claude_agent_sdk")` 探测——SDK 是可选依赖。
+- Codex 同样探测 `openai_codex_sdk`,但 SDK 自己又包了一个 `codex` CLI 二进制,需要单独配置(`codex login`)。将来这个方法可以扩展到探测二进制。
+- Base OpenAI 永远装得上——`openai` 是核心依赖——所以直接 `return True`。
+
+探测要在实例手边时做,`__init__` 之后、SDK 真正被用到之前。构造函数刻意做得很轻,不导入 SDK(SDK 导入全部 defer 到 `invoke` 方法内)。于是 `vulcan/runtime/runtime_manager.py` 里的 `RuntimeManager.register` 能够把每个已知 runtime 都实例化一遍,逐个问它"你装好了吗",并记录答案——而不会因为某个可选依赖没装就崩掉。
+
+## 三态 status 模型
+
+一个 runtime 永远处于三种状态之一:
+
+- **enabled** — 装好了,`vulcan.json` 里标了 `enable: true`。活在 `RuntimeManager._runtimes` 里,可以接流量。
+- **disabled** — 装好了,但 `enable: false`(或配置里干脆没有)。知道存在,只是没激活。
+- **uninstalled** — 可选 SDK 本身就 import 不进来。不是用户的错,不是 bug,就是现实。
+
+把 **disabled** 和 **uninstalled** 收成一个状态会是错的。它们的修复方式不同:enable 一个 disabled 的 runtime 是改配置;enable 一个 uninstalled 的要 `uv sync --extra claude-code` 或 `codex login`。`/runtime` 把两种状态分别列出来,用户才知道该拉哪根手柄。命令的具体输出见 [reference/commands](/docs/reference/commands)。
+
+## 下一个 runtime 长什么样
+
+Google ADK 落地时会是这样:
+
+1. 新建 `vulcan/runtime/google_adk/` 模块。
+2. 写一个 `BaseRuntime` 子类,`is_installed()` 探测 `google.adk`(delay import),`invoke()` 按 ADK 想要的方式构造 agent(session service + system instruction)、把 gateway 准备好的 prompt 喂进去、把 ADK 的事件翻译成 `SessionItem`。
+3. `vulcan/runtime/__init__.py` 的 `KNOWN_RUNTIMES` 多一行。
+4. 样例 `vulcan.json` 多一个 `google-adk` 键。
+
+gateway 不用改。channel 不用改。session 不用改。这份清单就这么短——这正是这个设计的全部用意。
+
+## model routing 放哪儿
+
+如果你想要那种经典 model routing——周一聊 Claude、周二聊 DeepSeek,统一走一个 Chat Completions 端点——合适的位置是 `BaseOpenAIRuntime` 内部。override `build_messages` 来注入你自己的结构,把 `base_url` 指到 LiteLLM 或 OpenRouter,让它们处理各家 provider 的翻译。Vulcan 不跟这些工具竞争,它跟它们组合在一起。
+
+请记住这条分界:Vulcan 在**用 model 的 agent** 之间调度;model router 在 **model** 之间调度。两者都有用。它们不是同一件事。

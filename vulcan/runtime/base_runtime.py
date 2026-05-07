@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from ..types.agent import AgentConfig
 from ..types.invocation import InvocationContext
@@ -19,3 +19,6 @@ class BaseRuntime(ABC):
 
     @abstractmethod
     def invoke(self, ctx: InvocationContext) -> AsyncIterator[SessionItem]: ...
+
+    @abstractmethod
+    def is_installed(self) -> bool: ...

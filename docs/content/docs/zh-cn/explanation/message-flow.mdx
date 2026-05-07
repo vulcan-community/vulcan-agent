@@ -1,0 +1,92 @@
+---
+title: 消息流与无状态 runtime
+description: 为什么每一轮 runtime 调用都是一次全新的 invocation,带着预渲染好的 history;以及这个决定为什么顺手让其它一切都变简单了。
+---
+
+一个决定支撑了 Vulcan 的大部分设计:runtime 是**每轮无状态**的。每次调用都收到一个新构造的 `InvocationContext`,里面是历史 transcript 和新的 user 消息;产出一串事件后返回。runtime 跨调用不保留任何记忆;gateway 除了落盘内容以外也不保留记忆。
+
+这一页把这件事的后果一步步讲清楚。
+
+## runtime 看到什么
+
+`InvocationContext`(`vulcan/types/invocation.py`)有三个字段:
+
+```python
+class InvocationContext(BaseModel):
+    channel_id: str
+    history_message: Message
+    message: Message
+```
+
+这就是 `runtime.invoke(ctx)` 的全部输入。runtime 拿不到 session 句柄、游标、数据库连接,也没有任何改状态的口子。它拿到两个 `Message`,都是 `user` 角色:
+
+- `message` — 当前 turn。
+- `history_message` — 之前全部东西,由 gateway 预渲染成一条 user-role 消息,文本外层包着 `<previous_conversations>...</previous_conversations>`。
+
+包裹里是每条过往 `SessionItem` 的原始 JSONL,每行一条,**一字不动**。不重新序列化,不重新塑形,不过滤。看一下 `vulcan/session/local_session_manager.py` 里的 `LocalSessionManager.assembly_history_messages`——总共十来行的文件读取和字符串拼接。
+
+## 为什么是原始 JSONL,而不是逐 runtime 重渲染
+
+有一种诱人的替代方案:把 history 翻译成每个 runtime 的原生格式——Base OpenAI 拿 Chat Completions messages,Codex 拿一个 prior-turns 列表,Claude Code 拿 Claude 原生的 block 结构。gateway 知道每个 runtime、每个 runtime 都拿到自己想要的 shape、adapter 更薄。
+
+Vulcan 恰好反过来做。gateway 把 history 渲染成一个 blob,**一次**,每个 runtime 自行决定怎么用。
+
+原因是谁知道什么。**gateway** 知道 transcript 的权威 shape——是它写的;它不该知道 runtime 偏好的渲染方式,那是 runtime 自己的事,会随着新增 runtime 而变。**runtime** 知道自己能消化什么。要把 transcript 当真正的多轮来回放?Base OpenAI 就这么干,把 blob 解回来。SDK 没有好口子这样做?Codex 没有 system 槽位、只吃一条 prompt 字符串,把 blob 拼到 prompt 前面,让模型靠自己的上下文能力处理。有原生上下文管理?Claude Code 把 blob 拼在当前 turn 之前扔给客户端,同理。
+
+三个 runtime,三种策略,gateway 对三者都不知情。这就是回报。
+
+这些策略在代码里直接能看到:
+
+- `vulcan/runtime/base_openai/base_openai.py` 里的 `BaseOpenAIRuntime._split_history` 剥掉外壳,走每一行 JSONL,吐出 `ChatCompletionUserMessageParam` / `ChatCompletionAssistantMessageParam`。它会扔掉自己处理不了的条目(tool call、reasoning),因为纯 Chat Completions 表达不了这些。
+- `vulcan/runtime/claude_code/claude_code.py` 里的 `ClaudeCodeRuntime.invoke` 把 `history_text` 和 `current_text` 用两个换行拼起来,通过 `client.query(...)` 送出去,余下交给 Claude Code 自己的上下文系统。
+- `vulcan/runtime/codex/codex.py` 里的 `CodexRuntime.invoke` 把 `persona`、`history_text`、`current_text` 拼成一条 prompt 字符串,交给 `thread.run_streamed(prompt)`。Codex 没有 system 槽位,所以人格和其它一切并排在 prompt 里。
+
+三种策略,一种输入 shape;将来第四个落地时,gateway 也不动。
+
+## 什么会被持久化,什么不会
+
+`Gateway.invoke_stream` 第 2 步装配 history **在**第 3 步写当前 user 消息**之前**。这不只是顺序纪律——它是 runtime 的输入得以保持干净的机制。runtime 看到的 history 永远不会包含它即将要回答的消息。
+
+第 6 步把 runtime 吐出的每一条 `SessionItem` 直接转发给调用者用于流式,但第 7 步只往 transcript 里写一行:累计好的 assistant 文本,作为一条 `Message`。tool call、tool output、reasoning 块**对 channel 实时可见**,但不会写进 session 文件。
+
+这是刻意的,也是一个值得点名的 trade-off。重播一段旧对话,不会还原当时的 tool 轨迹。反过来说,transcript 保持紧凑、可迁移、人类可读——你打开一段 session,看见的是用户说了啥、agent 答了啥,不用在一堆 `shell` 调用里翻。对 agent 重度的 runtime 来说这是真损失,以后可能加个配置开关。现阶段,简单的默认是对的。
+
+(有一处小的不一致:第 7 步把 assistant 文本当作新的 `Message` 落盘,但第 6 步也已经把同样的文本逐步 yield 出去了。如果 channel 自己也维护一份 transcript,要么消费第 7 步那条累计消息,要么自己去重——看 channel 实现里的做法。)
+
+## 为什么 `/switch` 很简单
+
+因为 runtime 跨 turn 无状态,切换它就没东西可交接。
+
+Runtime 绑定落在 session 自己身上——JSONL transcript 旁边的 sidecar 文件 `<session_id>.meta.json`。`SwitchCommand` 通过 `session_manager.set_session_runtime(channel_id, session_id, name)` 把新名字写到那个文件里,然后返回。下一次 `Gateway.invoke_stream` 走到第 2 步,从 meta 读到新绑定。新 runtime 读到的是**同一份** `<previous_conversations>` blob——里面原 runtime 的回复只是普通消息行,和其它消息无法区分——然后继续这段对话。其它 session 各自保留自己的绑定;`/switch` 严格是按 session 的操作。
+
+三个入口可以写入这份绑定:
+
+- `/switch <name>` —— 在对话里显式重绑。
+- API middleware —— HTTP 请求的 `"model"` 字段非空时,gateway 调用前先写入。API 请求相当于一次隐式 `/switch`。
+- Gateway 自身 —— 面对还未绑定过的新 session,第 2 步会把 `config.default_runtime` 写进去,保证从第一条真消息起 session 就一定有运行时。
+
+对比一下如果 runtime 背着 session state 会是什么样:每个 runtime 要一份序列化契约、跨 schema 要一条迁移路径、tool call 中途切换要专门处理、还得告诉新 runtime "历史里 assistant 那些 turn 其实是另一栈产生的"。把 runtime 做成无状态、绑定做成 session 级别的元数据,这些全都不存在。
+
+代价是每轮要付 setup 成本(建 SDK client、重新注入人格)。对交互式 agent 负载,这点成本被 LLM 调用本身淹没,通常感觉不到。
+
+## 为什么 `channel_id` 是命名空间
+
+session 的 key 是 `(channel_id, session_id)`,不是 `(user_id, session_id)`。这个选择背后的问题是"对话活在哪里",而不是"谁拥有对话"。
+
+- HTTP API 用 `channel_id = "gateway"`(常量 `GATEWAY_CHANNEL_ID`)。session id 来自 `x-session-id` header,调用方自己选。
+- 飞书用 `channel_id = "feishu"`,按 chat 或按用户分 session,它自己决定。
+- 将来的 Slack channel 会用 `channel_id = "slack"`,再定自己的方案。
+
+每种入站传输都有独立命名空间。飞书一段 id 为 `default` 的 session,和 HTTP 一段 id 为 `default` 的 session,在不同目录下的不同文件里,彼此不相干。这个颗粒度是对的,因为**传输**决定了用户怎么自报身份、以及 session 怎么对应外部对话。绑到 `user_id` 会要求每个 channel 都接入一个全局用户系统;绑到 `channel_id` 则让每个 channel 自己定义它认为的"身份"。
+
+这也意味着 Vulcan 目前在每个 channel 内是单租户的。飞书多用户部署需要飞书 channel 把 session id 按 Lark 的 `open_id` 再做一层 namespace。那是 channel 级改动,不是 gateway 级的。
+
+## 事件流的形状
+
+一条 `SessionItem` 是一小组 shape 之一:assistant `Message`、`ResponseReasoningItem`、`ResponseFunctionToolCall`、`ResponseFunctionToolCallOutput`。runtime 在事件到达时吐出来,gateway 原样透传。
+
+然后 channel 决定怎么渲染。飞书的 CardKit 卡片这四种都画。HTTP API 会折叠——只有 assistant 文本会进 `ChatCompletion`,因为 `ChatCompletion` 本身没地方放 reasoning 或 tool 轨迹。这是说一套"前 agent 时代的 API shape"要付的代价,没事:要全流,走 channel。
+
+## 贯穿的那条线
+
+贯穿这一切的线是:状态活在一个地方(JSONL 文件),渲染成一种 shape(`<previous_conversations>` blob),交给一组无状态的组件,每个只做一件事。这不是什么了不起的架构洞见,但它是这份代码库能保持小的原因,也是新 runtime、新 channel 能干净落地而不搅动其它地方的原因。

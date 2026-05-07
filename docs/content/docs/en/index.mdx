@@ -1,20 +1,30 @@
 ---
 title: Introduction
-description: Your personal AI assistant — one place to chat, your choice of model.
+description: Vulcan is the dispatch layer for pluggable agent runtimes — one session, one API, many agent stacks.
 ---
 
-Vulcan is a personal AI assistant you run yourself.
+Vulcan is the dispatch layer for **pluggable agent runtimes**. An "agent runtime" here is a full orchestration stack, not just an LLM — it's the model plus its tool surface, its sandbox, its reasoning loop. Claude Code reads files, edits code, runs shell, speaks MCP. OpenAI Codex does the same class of work. Google ADK brings its own orchestrator. Base OpenAI is plain Chat Completions — no built-in tools. Vulcan puts all of them behind one OpenAI-compatible API, keeps one JSONL transcript per session, and exposes one slash-command control plane. The same conversation can hop between runtimes mid-stream via `/switch`.
 
-You talk to it from anywhere — a chat app on your phone, a web UI on your laptop, your terminal. Behind the scenes Vulcan can use Claude, OpenAI, or any other model you point it at, and you can switch between them mid-conversation. Your chats are saved on your own machine, never sent to a third party beyond the model you chose.
+## What Vulcan is not
 
-Set it up once, then forget about plumbing. Vulcan keeps your conversations organized, remembers context across days, and shows you what the model is thinking and which tools it's using — all in one tidy view.
+Not a model router. LiteLLM, OpenRouter and friends swap the underlying model weights behind a single chat-completion shape — same tools (none), different weights. Vulcan sits one level up: you swap the entire agent *stack* — different tool surfaces, different sandboxes, different reasoning loops, different persona injection hooks. Also not a new chat UI and not a prompt library — it speaks the OpenAI HTTP API so your existing clients (OpenWebUI, the `openai` SDK, `curl`, Feishu) just work.
 
-## Get going
+## Supported agent runtimes
+
+| Runtime       | Status    | What it is                                                   |
+| ------------- | --------- | ------------------------------------------------------------ |
+| `claude-code` | ✅        | Anthropic's Claude Code agent — files, shell, MCP, thinking. |
+| `codex`       | ✅        | OpenAI Codex CLI — files, shell, MCP, web search.            |
+| `base-openai` | ✅        | Any OpenAI-compatible Chat Completions endpoint. No tools.   |
+| `google-adk`  | planned   | Google Agent Development Kit.                                |
+
+Each runtime ships as an optional extra (`uv sync --extra claude-code`, `--extra codex`). Install only the ones you use.
+
+## Where to go next
 
 <Cards>
-  <Card title="Quick start" href="/docs/quick-start" />
-  <Card title="What's inside" href="/docs/architecture" />
-  <Card title="Pick a model" href="/docs/runtimes" />
-  <Card title="Connect a chat app" href="/docs/channels" />
-  <Card title="Slash commands" href="/docs/commands" />
+  <Card title="Get started" href="/docs/tutorials/quick-start" description="Zero to a working conversation in five minutes, then switch agent runtime mid-stream." />
+  <Card title="Recipes" href="/docs/how-to/connect-feishu" description="Task-oriented how-tos — hook up a channel, add a runtime, add a command." />
+  <Card title="Reference" href="/docs/reference/commands" description="Config schema, slash commands, CLI, runtime and channel catalogs." />
+  <Card title="Design & rationale" href="/docs/explanation/agent-runtimes" description="Why pluggable agent runtimes, not model routing — and how sessions and the control plane fit together." />
 </Cards>

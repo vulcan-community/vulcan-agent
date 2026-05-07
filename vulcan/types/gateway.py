@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Dict
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,8 +38,7 @@ class ChannelConfig(BaseModel):
     enable: bool = Field(
         default=False, description="Whether to enable this channel"
     )
-    runtime: str = Field(..., description="Runtime to use for this channel")
-    config: Dict = Field(
+    config: dict = Field(
         default_factory=dict, description="Channel-specific configuration"
     )
 
@@ -49,8 +47,17 @@ class GatewayConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: str = VERSION
-    runtimes: Dict[str, RuntimeConfig] = Field(default_factory=dict)
-    channels: Dict[str, ChannelConfig] = Field(default_factory=dict)
+    default_runtime: str = Field(
+        default="base-openai",
+        description=(
+            "Fallback runtime name used for a session that hasn't been"
+            " bound to a runtime yet (no explicit `model` on the request"
+            " and no prior `/switch`). Must match a key in"
+            " `vulcan.runtime.KNOWN_RUNTIMES`."
+        ),
+    )
+    runtimes: dict[str, RuntimeConfig] = Field(default_factory=dict)
+    channels: dict[str, ChannelConfig] = Field(default_factory=dict)
 
     def dump(self, home_dir: Path) -> None:
         config_path = home_dir / "vulcan.json"

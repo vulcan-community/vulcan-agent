@@ -1,5 +1,3 @@
-from typing import List
-
 from openai.types.conversations import ConversationItem
 from pydantic import BaseModel
 
@@ -23,4 +21,5 @@ class Session(BaseModel):
     appends new items as events stream back from a runtime.
     """
 
-    items: List[SessionItem]
+    runtime_name: str | None = None
+    items: list[SessionItem]

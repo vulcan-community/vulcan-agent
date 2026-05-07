@@ -1,43 +1,38 @@
+import importlib.util
 import json
-import uuid
-from typing import AsyncIterator
-
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    TextBlock,
-    ThinkingBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
-)
-from openai.types.conversations.message import Message
-from openai.types.responses.response_function_tool_call_item import (
-    ResponseFunctionToolCallItem,
-)
-from openai.types.responses.response_function_tool_call_output_item import (
-    ResponseFunctionToolCallOutputItem,
-)
-from openai.types.responses.response_output_text import ResponseOutputText
-from openai.types.responses.response_reasoning_item import (
-    Content as ReasoningContent,
-)
-from openai.types.responses.response_reasoning_item import (
-    ResponseReasoningItem,
-)
+from collections.abc import AsyncIterator
 
 from ...types.invocation import InvocationContext
 from ...types.session import SessionItem
+from ...utils.messages import (
+    assistant_message,
+    message_text,
+    reasoning_item,
+    tool_call_item,
+    tool_output_item,
+)
 from ..base_runtime import BaseRuntime
 
 
 class ClaudeCodeRuntime(BaseRuntime):
+    def is_installed(self) -> bool:
+        return importlib.util.find_spec("claude_agent_sdk") is not None
+
     async def invoke(
         self, ctx: InvocationContext
     ) -> AsyncIterator[SessionItem]:
-        history_text = self._message_text(ctx.history_message)
-        current_text = self._message_text(ctx.message)
+        # Deferred import so the class module can be loaded even when the
+        # optional `claude-agent-sdk` isn't installed (is_installed()
+        # reports that state without triggering the import).
+        from claude_agent_sdk import (
+            AssistantMessage,
+            ClaudeAgentOptions,
+            ClaudeSDKClient,
+            UserMessage,
+        )
+
+        history_text = message_text(ctx.history_message)
+        current_text = message_text(ctx.message)
 
         model_cfg = self.agent_config.model
         env: dict[str, str] = {}
@@ -58,7 +53,7 @@ class ClaudeCodeRuntime(BaseRuntime):
             system_prompt={
                 "type": "preset",
                 "preset": "claude_code",
-                "append": self._persona_prompt(),
+                "append": self.agent_config.instruction.render(),
             },
         )
         async with ClaudeSDKClient(options=options) as client:
@@ -89,37 +84,22 @@ class ClaudeCodeRuntime(BaseRuntime):
                                 yield item
 
     def _block_to_item(self, block) -> SessionItem | None:
+        from claude_agent_sdk import (
+            TextBlock,
+            ThinkingBlock,
+            ToolResultBlock,
+            ToolUseBlock,
+        )
+
         if isinstance(block, TextBlock):
-            return Message(
-                id=str(uuid.uuid4()),
-                type="message",
-                role="assistant",
-                status="completed",
-                content=[
-                    ResponseOutputText(
-                        type="output_text",
-                        text=block.text,
-                        annotations=[],
-                    )
-                ],
-            )
+            return assistant_message(block.text)
         if isinstance(block, ThinkingBlock):
-            return ResponseReasoningItem(
-                id=str(uuid.uuid4()),
-                type="reasoning",
-                summary=[],
-                content=[
-                    ReasoningContent(type="reasoning_text", text=block.thinking)
-                ],
-            )
+            return reasoning_item(block.thinking)
         if isinstance(block, ToolUseBlock):
-            return ResponseFunctionToolCallItem(
-                id=str(uuid.uuid4()),
-                type="function_call",
+            return tool_call_item(
                 call_id=block.id,
                 name=block.name,
-                arguments=json.dumps(block.input, ensure_ascii=False),
-                status="completed",
+                arguments=block.input,
             )
         if isinstance(block, ToolResultBlock):
             content = block.content
@@ -127,21 +107,9 @@ class ClaudeCodeRuntime(BaseRuntime):
                 output = json.dumps(content, ensure_ascii=False)
             else:
                 output = content or ""
-            return ResponseFunctionToolCallOutputItem(
-                id=str(uuid.uuid4()),
-                type="function_call_output",
+            return tool_output_item(
                 call_id=block.tool_use_id,
                 output=output,
-                status="incomplete" if block.is_error else "completed",
+                is_error=block.is_error or False,
             )
         return None
-
-    def _persona_prompt(self) -> str:
-        """Compose Vulcan's persona (identity + soul + tool guidance), to be
-        injected after Claude Code's default system prompt."""
-        i = self.agent_config.instruction
-        return "\n\n".join(s for s in (i.identity, i.soul, i.tool) if s.strip())
-
-    @staticmethod
-    def _message_text(msg: Message) -> str:
-        return "".join(getattr(c, "text", "") for c in msg.content)
