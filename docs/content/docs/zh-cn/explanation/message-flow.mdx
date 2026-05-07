@@ -55,7 +55,7 @@ Vulcan 恰好反过来做。gateway 把 history 渲染成一个 blob,**一次**,
 
 ## 为什么是 conversation + session 两层
 
-身份分两层。**conversation** 是稳定的用户侧地址——飞书的 `chat_id`、HTTP 的 `X-Conversation-Id` header——跨 `/new` 保持不变。**session** 是具体的 transcript——一对 `<session_id>.jsonl` + `<session_id>.meta.json`,id 是 12 位十六进制字符随机生成。每个 conversation 在 `<channel_id>/_conversations/<conversation_id>.json` 有一个指针文件,记它当前挂的 session;`/new` 把指针换到新分配的 session,`/resume` 把指针移到已有的 session。运行时绑定落在 session 上而不是 conversation 上——正因如此,`/new` 能沿用上一段 session 的绑定,而 conversation 本身从不需要"知道"运行时这回事。
+身份分两层。**conversation** 是稳定的用户侧地址——飞书的 `chat_id`、HTTP 的 `X-Conversation-Id` header——跨 `/new` 保持不变。**session** 是具体的 transcript——一对 `<session_id>.jsonl` + `<session_id>.meta.json`,id 是 12 位十六进制字符随机生成。每个 conversation 在 `<channel_id>/_conversations/<conversation_id>.json` 有一个指针文件,记它当前挂的 session;`/new` 把指针换到新分配的 session,`/resume` 把指针移到已有的 session。运行时绑定落在 session 上而不是 conversation 上——正因如此,`/new` 能沿用上一段 session 的绑定,而 conversation 本身从不需要"知道"运行时这回事。磁盘布局和每个文件里确切存什么,见 [Sessions](/docs/reference/sessions)。
 
 ## 为什么 `/switch` 很简单
 
