@@ -11,6 +11,7 @@ from .card_session import CardSession
 async def send_streaming_msg(session: CardSession, chunk: str) -> None:
     if not chunk:
         return
+    session.full_text += chunk
     if session.open_text_id is None:
         elem_id = session.new_id("text")
         session.open_text_buf = chunk

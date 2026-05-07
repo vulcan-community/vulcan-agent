@@ -58,6 +58,11 @@ class CardSession:
         # fresh element rather than appending to a stale one.
         self.open_text_id: str | None = None
         self.open_text_buf: str = ""
+        # Running concat of every text chunk ever streamed into this card,
+        # across text-element rotations. Used by `finish()` to set the
+        # card summary once the stream ends — so the chat preview shows
+        # the final reply instead of "Vulcan is replying...".
+        self.full_text: str = ""
         # call_id → (inner_markdown_element_id, args_json) — used by
         # send_tool.send_tool_result to update the matching panel body.
         self.tool_state: dict[str, tuple[str, str]] = {}
@@ -100,10 +105,15 @@ class CardSession:
         await self.client.im.v1.message.areply(reply_req)
 
     async def finish(self) -> None:
-        """Flip streaming mode off so the AI-generating indicator clears."""
+        """Flip streaming mode off and replace the card summary so the
+        chat preview shows the final reply instead of "Vulcan is
+        replying...". Summary is derived from every text chunk streamed
+        into this card; truncated to a single-line preview.
+        """
         assert self.client.cardkit is not None
         assert self.card_id is not None
 
+        summary = self._build_summary()
         req = (
             SettingsCardRequest.builder()
             .card_id(self.card_id)
@@ -112,7 +122,12 @@ class CardSession:
                 .uuid(f"{self.card_id}-finish-{int(time.time() * 1000)}")
                 .settings(
                     json.dumps(
-                        {"config": {"streaming_mode": False}},
+                        {
+                            "config": {
+                                "streaming_mode": False,
+                                "summary": {"content": summary},
+                            }
+                        },
                         ensure_ascii=False,
                     )
                 )
@@ -123,6 +138,18 @@ class CardSession:
         )
         await self.client.cardkit.v1.card.asettings(req)
         logger.info(f"cardkit card finished: card_id={self.card_id}")
+
+    def _build_summary(self, max_len: int = 80) -> str:
+        """Turn accumulated `full_text` into a single-line preview."""
+        text = self.full_text.strip()
+        if not text:
+            return "Vulcan replied."
+        # Collapse whitespace (newlines + runs of spaces) so the chat
+        # preview stays on one line.
+        flat = " ".join(text.split())
+        if len(flat) <= max_len:
+            return flat
+        return flat[: max_len - 1].rstrip() + "…"
 
     def next_sequence(self) -> int:
         seq = self.sequence
