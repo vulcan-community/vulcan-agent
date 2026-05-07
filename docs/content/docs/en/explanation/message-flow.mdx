@@ -53,17 +53,23 @@ This is deliberate, and it's a trade-off worth naming. Replaying a past conversa
 
 (One small inconsistency: the assistant text is written as a fresh `Message` in step 7, but the gateway also yields the same text progressively during step 6. Channels that also feed items into a transcript-of-their-own should consume step 7's aggregated message or dedupe — see the channel implementations for examples.)
 
+## Why conversation vs session
+
+Two layers of identity. A **conversation** is the stable user-facing address — Feishu `chat_id`, HTTP `X-Conversation-Id` header — and it persists across `/new`. A **session** is a concrete transcript — a `<session_id>.jsonl` + `<session_id>.meta.json` pair keyed by a random 12-hex-char id. Each conversation has a pointer file at `<channel_id>/_conversations/<conversation_id>.json` that names its current session; `/new` rotates that pointer to a freshly allocated session, `/resume` moves it to an existing one. Runtime binding lives on the session, not the conversation — which is why `/new` can inherit the previous session's binding without the conversation ever having to "know" about runtimes.
+
 ## Why `/switch` is trivial
 
 Because runtimes hold no state between turns, switching them has nothing to hand off.
 
-Runtime binding lives on the session itself — in a sidecar `<session_id>.meta.json` next to the JSONL transcript. `SwitchCommand` writes the new name to that file via `session_manager.set_session_runtime(channel_id, session_id, name)` and returns. Next time `Gateway.invoke_stream` runs step 2, it reads the meta and resolves the new runtime. The new runtime reads the same `<previous_conversations>` blob — which contains the previous runtime's replies as plain message lines, indistinguishable from any other message — and continues the conversation. Other sessions keep their own bindings; `/switch` is strictly a per-session operation.
+Runtime binding lives on the session itself — in a sidecar `<session_id>.meta.json` next to the JSONL transcript. `SwitchCommand` resolves the conversation's current session via the pointer, writes the new name to that session's meta via `session_manager.set_session_runtime(channel_id, session_id, name)`, and returns. Next time `Gateway.invoke_stream` resolves the session and reads the meta, it picks up the new runtime. The new runtime reads the same `<previous_conversations>` blob — which contains the previous runtime's replies as plain message lines, indistinguishable from any other message — and continues the conversation. Other sessions keep their own bindings; `/switch` is strictly a per-session operation.
 
-Three entry points can write the binding:
+Three entry points can write the runtime binding:
 
-- `/switch <name>` — explicit rebind from inside a conversation.
-- The API middleware — when an HTTP request's `"model"` field is non-empty, it's persisted before the gateway is called. An API request is effectively an implicit `/switch`.
-- The gateway itself — on a fresh session with no prior binding, step 2 writes `config.default_runtime` so the session always has a runtime from the first real message onward.
+- `/switch <name>` — explicit rebind on the conversation's current session.
+- `MessageMiddleware` (the API path) — when an HTTP request's `"model"` field is non-empty, the middleware resolves the conversation's current session and calls `set_session_runtime` before the gateway is invoked. An API request with a `"model"` is effectively an implicit `/switch`.
+- `LocalSessionManager.resolve_current_session` (the gateway's fresh-session fallback) — when a conversation has no pointer yet, a fresh session is allocated bound to `config.default_runtime` and the pointer is installed. This guarantees every session has a runtime from its first real message onward.
+
+`/new` is a separate mechanism: it does not touch any existing session's meta. It allocates a fresh session, writes that session's meta (inheriting the previous session's `runtime_name`), and rewrites the conversation pointer file. The old session's meta and transcript stay on disk untouched — `/resume <old_session_id>` will find them.
 
 Compare this to what switching would look like if runtimes carried session state: you'd need a serialisation contract per runtime, a migration path for mismatched schemas, handling for mid-tool-call switches, and a way to tell the new runtime that the assistant turns in history came from a different stack. By making runtimes stateless and making the binding a piece of session-level metadata, none of that exists.
 
@@ -73,13 +79,13 @@ The cost is that each turn pays the setup cost (building the SDK client, re-inje
 
 Sessions are keyed by `(channel_id, session_id)`, not by `(user_id, session_id)`. The reasoning is about *where* a conversation lives, not *who* owns it.
 
-- The HTTP API uses `channel_id = "gateway"` (the `GATEWAY_CHANNEL_ID` constant). Session ids come from the `x-session-id` header — the caller chooses them.
-- Feishu uses `channel_id = "feishu"` and picks a session id per chat or per user as it sees fit.
+- The HTTP API uses `channel_id = "gateway"` (the `GATEWAY_CHANNEL_ID` constant). Conversation ids come from the `X-Conversation-Id` header — the caller chooses them.
+- Feishu uses `channel_id = "feishu"` and `conversation_id = chat_id`.
 - A future Slack channel will use `channel_id = "slack"` and decide its own scheme.
 
-Each inbound transport gets its own namespace. A Feishu session with id `default` and an HTTP session with id `default` are separate files in separate directories. This is the right granularity because the *transport* is what determines how users identify themselves and how sessions relate to external conversations. Binding to `user_id` would require each channel to know about a global user system; binding to `channel_id` lets each channel define its own sense of identity.
+Each inbound transport gets its own namespace. A Feishu conversation with id `default` and an HTTP conversation with id `default` are separate pointer files under separate directories. This is the right granularity because the *transport* is what determines how users identify themselves and how conversations relate to external threads. Binding to `user_id` would require each channel to know about a global user system; binding to `channel_id` lets each channel define its own sense of identity.
 
-This also means Vulcan is single-tenant-per-channel today. A multi-user Feishu deployment would need the Feishu channel to namespace session ids by the Lark `open_id`. That's a channel-level change, not a gateway-level one.
+This also means Vulcan is single-tenant-per-channel today. A multi-user Feishu deployment would need the Feishu channel to namespace conversation ids by the Lark `open_id`. That's a channel-level change, not a gateway-level one.
 
 ## The shape of an event stream
 

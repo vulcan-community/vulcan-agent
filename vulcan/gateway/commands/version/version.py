@@ -18,6 +18,6 @@ class VersionCommand(BaseCommand):
         self._gateway = gateway
 
     def exec(
-        self, args: list[str], channel_id: str, session_id: str
+        self, args: list[str], channel_id: str, conversation_id: str
     ) -> ChatCompletion:
         return self._reply(f"vulcan-agent {VERSION}")

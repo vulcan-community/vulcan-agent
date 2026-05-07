@@ -3,7 +3,7 @@ title: 介绍
 description: Vulcan 是可插拔 agent runtime 的 dispatch 层 —— 一个 session，一套 API，任你换 agent 栈。
 ---
 
-Vulcan 是**可插拔 agent runtime** 的 dispatch 层。这里的 "agent runtime" 不是单指一个 LLM，而是整套编排栈 —— 模型、工具面、沙箱、推理回路都包在里面。Claude Code 会读文件、改代码、跑 shell、讲 MCP；OpenAI Codex 做的是同一类活；Google ADK 自带一套 orchestrator；base OpenAI 就是纯 Chat Completions，没有内建工具。Vulcan 把它们全部挂在一套 OpenAI 兼容 API 后面，每个 session 留一份 JSONL 流水，一套 slash command 构成 control plane。同一段对话可以通过 `/switch` 中途切到另一个 runtime。
+Vulcan 是**可插拔 agent runtime** 的 dispatch 层。这里的 "agent runtime" 不是单指一个 LLM，而是整套编排栈 —— 模型、工具面、沙箱、推理回路都包在里面。Claude Code 会读文件、改代码、跑 shell、讲 MCP；OpenAI Codex 做的是同一类活；Google ADK 自带一套 orchestrator；base OpenAI 就是纯 Chat Completions，没有内建工具。Vulcan 把它们全部挂在一套 OpenAI 兼容 API 后面，每个 session 留一份 JSONL 流水，一套 slash command 构成 control plane。每段 conversation 都有自己的 transcript，`/new` 在同一段 conversation 上起一份新的；同一段对话还能通过 `/switch` 中途切到另一个 runtime。
 
 ## Vulcan 不是什么
 

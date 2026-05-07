@@ -36,18 +36,18 @@ Channel 不挑运行时。运行时选择是按 session 的 —— gateway 从 s
 ```python
 async def invoke(
     self,
-    session_id: str,
+    conversation_id: str,
     user_message: Message,
 ) -> ChatCompletion: ...
 
 async def invoke_stream(
     self,
-    session_id: str,
+    conversation_id: str,
     user_message: Message,
 ) -> AsyncIterator[SessionItem]: ...
 ```
 
-在对话内发 `/switch <name>` 只重绑当前 session。
+Gateway 通过 `_conversations/<id>.json` 指针把 `(channel_id, conversation_id)` 解析到当前 session —— 见 [Sessions](./sessions)。`/switch <name>` 只重绑当前 session；`/new` 让下一条消息落到一段新 session。
 
 ## 注册表
 
@@ -78,7 +78,7 @@ async def invoke_stream(
 - 每轮会话：
   1. `send_reaction` —— 向源消息回复 emoji 确认。
   2. `CardSession.start()` —— 创建 CardKit 卡片作为回复。
-  3. `self.invoke_stream(session_id=<chat_id>, user_message=...)` —— 由 gateway 分派到运行时。
+  3. `self.invoke_stream(conversation_id=<chat_id>, user_message=...)` —— 由 gateway 分派到运行时。
   4. 按 `SessionItem` 类型渐进渲染（见下表）。
   5. `CardSession.finish()` —— 清除流式指示。
 
@@ -91,9 +91,9 @@ async def invoke_stream(
 | `ResponseFunctionToolCallItem`         | 新 `collapsible_panel`，标题为工具名，正文为参数。                  |
 | `ResponseFunctionToolCallOutputItem`   | 按 `call_id` 配对的同一 panel，内部 markdown 追加 result 段落；`is_error = status == "incomplete"`。 |
 
-### `session_id` 映射
+### `conversation_id` 映射
 
-`session_id` 取入站消息的 Feishu `chat_id` —— 一个 Feishu 会话对应一个 Vulcan session。
+`conversation_id` 取入站消息的 Feishu `chat_id` —— 一个 Feishu 会话对应一个 Vulcan conversation。conversation 内部由 `/new` 轮换出一段段 session（transcript），但 `chat_id` 本身保持稳定。
 
 ## 计划中的 channel
 

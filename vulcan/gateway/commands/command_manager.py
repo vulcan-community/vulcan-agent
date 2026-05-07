@@ -20,11 +20,11 @@ class CommandManager:
         return None
 
     def exec_command(
-        self, command_text: str, channel_id: str, session_id: str
+        self, command_text: str, channel_id: str, conversation_id: str
     ) -> ChatCompletion:
         command = self.match_command(command_text)
         if command is None:
             raise ValueError(f"Command '{command_text}' not found")
 
         args = command.parse_args(command_text)
-        return command.exec(args, channel_id, session_id)
+        return command.exec(args, channel_id, conversation_id)

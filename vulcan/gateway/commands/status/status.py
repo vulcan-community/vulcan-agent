@@ -13,20 +13,21 @@ class StatusCommand(BaseCommand):
         super().__init__(
             command="status",
             description=(
-                "Report this session's binding plus its runtime and model"
-                " configuration: /status"
+                "Report this conversation's current session plus its"
+                " runtime and model configuration: /status"
             ),
         )
         self._gateway = gateway
 
     def exec(
-        self, args: list[str], channel_id: str, session_id: str
+        self, args: list[str], channel_id: str, conversation_id: str
     ) -> ChatCompletion:
-        del args  # Unused.
+        del args
         sess = self._gateway.session_manager
         mgr = self._gateway.runtime_manager
         default_runtime = self._gateway.config.default_runtime
 
+        session_id = self._current_session_id(channel_id, conversation_id)
         bound_name = sess.get_session_runtime(channel_id, session_id)
         resolved_name = bound_name or default_runtime
         runtime_label = (
@@ -69,11 +70,12 @@ class StatusCommand(BaseCommand):
             ]
 
         lines = [
-            "Session:",
-            f"  channel    : {channel_id}",
-            f"  id         : {session_id}",
-            f"  items      : {item_count}",
-            f"  runtime    : {runtime_label}",
+            "Conversation:",
+            f"  channel         : {channel_id}",
+            f"  conversation    : {conversation_id}",
+            f"  current session : {session_id}",
+            f"  items           : {item_count}",
+            f"  runtime         : {runtime_label}",
             "",
             "Runtime:",
             f"  name       : {resolved_name}",

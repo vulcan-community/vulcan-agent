@@ -111,6 +111,6 @@ Users install it with `uv sync --extra my-runtime`.
 }
 ```
 
-Restart. `/runtime` from any channel should now list `my-runtime` as `enabled`. Users opt in **per session** — `/switch my-runtime` rebinds the current chat, or API callers set `"model": "my-runtime"` (the middleware persists it to the session's meta sidecar). Other sessions keep their own bindings. To make your runtime the fallback for brand-new sessions, set `"default_runtime": "my-runtime"` at the top of `vulcan.json`.
+Restart. `/runtime` from any channel should now list `my-runtime` as `enabled`. Users opt in **per session** — `/switch my-runtime` rebinds the conversation's current session, or API callers set `"model": "my-runtime"` (the middleware resolves the conversation's current session and persists it to that session's meta sidecar). Other sessions keep their own bindings. To make your runtime the fallback for brand-new conversations, set `"default_runtime": "my-runtime"` at the top of `vulcan.json`.
 
 For the semantics of `history_message` vs. `message` and how the gateway assembles them from the session log, see [Message flow](/docs/explanation/message-flow).

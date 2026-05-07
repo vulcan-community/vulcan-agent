@@ -29,7 +29,7 @@ client = OpenAI(
 reply = client.chat.completions.create(
     model="claude-code",
     messages=[{"role": "user", "content": "hello"}],
-    extra_headers={"X-Session-Id": "my-session"},
+    extra_headers={"X-Conversation-Id": "my-conversation"},
 )
 print(reply.choices[0].message.content)
 ```
@@ -37,15 +37,15 @@ print(reply.choices[0].message.content)
 A few things to know:
 
 - **`model` is a runtime name, not an LLM.** Pass one of the enabled runtimes — run `/runtime` from any channel to see the list (`claude-code`, `codex`, `base-openai`, …). The string you pass picks which agent runtime handles the turn.
-- **`X-Session-Id` is how turns stitch together.** Keep sending the same ID and Vulcan replays prior turns as history. Omit the header and Vulcan falls back to the session named `default`. The `channel_id` on the gateway side is always `"gateway"` for HTTP traffic.
-- **`model` is an implicit `/switch`.** The middleware writes `body["model"]` to the session's `.meta.json` sidecar *before* dispatching, so subsequent turns on the same `X-Session-Id` stay on that runtime unless you send another `model`. Omitting `"model"` preserves the existing binding; a brand-new session with no binding and no `"model"` falls back to `config.default_runtime` from `vulcan.json`.
+- **`X-Conversation-Id` is how turns stitch together.** Keep sending the same id and Vulcan replays prior turns as history. Omit the header and Vulcan falls back to the conversation named `default`. The `channel_id` on the gateway side is always `"gateway"` for HTTP traffic. A conversation id is stable — `/new` rotates the *session* underneath it to a fresh transcript without changing the id you send.
+- **`model` is an implicit `/switch` on the conversation's current session.** The middleware resolves the conversation's current session and writes `body["model"]` to that session's `.meta.json` sidecar *before* dispatching, so subsequent turns on the same `X-Conversation-Id` stay on that runtime unless you send another `model`. Omitting `"model"` preserves the existing binding; a brand-new conversation with no pointer and no `"model"` falls back to `config.default_runtime` from `vulcan.json`.
 
 ## 3. Equivalent `curl`
 
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: my-session" \
+  -H "X-Conversation-Id: my-conversation" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "hello"}]
@@ -54,17 +54,17 @@ curl http://localhost:4000/v1/chat/completions \
 
 ## Switching runtimes from the API
 
-Two ways, both per-session:
+Two ways, both per-session on the conversation's current session:
 
-1. **Pass a different `model`.** The middleware persists it to this session's meta before dispatching. The next request on the same `X-Session-Id` continues on the new runtime even if you omit `model`.
-2. **Send `/switch <name>` as a message.** Same effect, but triggered from the chat side. Different Feishu chats or different `X-Session-Id`s keep their own bindings — `/switch` only affects the session that issued it.
+1. **Pass a different `model`.** The middleware resolves the current session and persists it to that session's meta before dispatching. The next request on the same `X-Conversation-Id` continues on the new runtime even if you omit `model`.
+2. **Send `/switch <name>` as a message.** Same effect, but triggered from the chat side. Different Feishu chats or different `X-Conversation-Id`s keep their own bindings — `/switch` only affects the session whose conversation issued it.
 
 ```python
 client.chat.completions.create(
     model="claude-code",   # handles this /switch turn AND rebinds the session
     messages=[{"role": "user", "content": "/switch codex"}],
-    extra_headers={"X-Session-Id": "my-session"},
+    extra_headers={"X-Conversation-Id": "my-conversation"},
 )
 ```
 
-After this call, `my-session` is bound to `codex`. There's no global "current runtime" — other `X-Session-Id`s and other channels are unaffected.
+After this call, `my-conversation`'s current session is bound to `codex`. There's no global "current runtime" — other `X-Conversation-Id`s and other channels are unaffected.

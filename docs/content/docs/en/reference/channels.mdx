@@ -36,18 +36,18 @@ Both are `@final` and delegate directly to the gateway. They pass `self.name` as
 ```python
 async def invoke(
     self,
-    session_id: str,
+    conversation_id: str,
     user_message: Message,
 ) -> ChatCompletion: ...
 
 async def invoke_stream(
     self,
-    session_id: str,
+    conversation_id: str,
     user_message: Message,
 ) -> AsyncIterator[SessionItem]: ...
 ```
 
-`/switch <name>` from inside any conversation rebinds only that session.
+The gateway resolves `(channel_id, conversation_id)` to the current session via the `_conversations/<id>.json` pointer — see [Sessions](./sessions). `/switch <name>` rebinds only that session; `/new` rotates the conversation to a fresh session on the next message.
 
 ## Registry
 
@@ -78,7 +78,7 @@ Fields under `channels.feishu.config`:
 - Each turn:
   1. `send_reaction` — ack emoji on the source message.
   2. `CardSession.start()` — create a CardKit card as reply.
-  3. `self.invoke_stream(session_id=<chat_id>, user_message=...)` — gateway-driven runtime dispatch.
+  3. `self.invoke_stream(conversation_id=<chat_id>, user_message=...)` — gateway-driven runtime dispatch.
   4. Progressive rendering per `SessionItem` type (table below).
   5. `CardSession.finish()` — clear the streaming indicator.
 
@@ -91,9 +91,9 @@ Fields under `channels.feishu.config`:
 | `ResponseFunctionToolCallItem`         | New `collapsible_panel` titled with the tool name; body shows args. |
 | `ResponseFunctionToolCallOutputItem`   | Same panel (paired by `call_id`) — inner markdown adds a result section; `is_error = status == "incomplete"`. |
 
-### `session_id` mapping
+### `conversation_id` mapping
 
-`session_id` is set to the Feishu `chat_id` of the inbound message — one Feishu chat equals one Vulcan session.
+`conversation_id` is set to the Feishu `chat_id` of the inbound message — one Feishu chat equals one Vulcan conversation. Inside that conversation, `/new` rotates to a fresh session (transcript) while the `chat_id` stays stable.
 
 ## Planned channels
 

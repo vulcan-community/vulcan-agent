@@ -86,7 +86,7 @@ Open a second terminal and `curl` the endpoint:
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: default" \
+  -H "X-Conversation-Id: default" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "hello, who are you?"}]
@@ -95,10 +95,10 @@ curl http://localhost:4000/v1/chat/completions \
 
 You will get back a regular `ChatCompletion` JSON object with the assistant's reply in `choices[0].message.content`. Two things to note:
 
-- `X-Session-Id: default` — any string, as long as you reuse it next turn. Vulcan stores the transcript at `~/.vulcan/sessions/gateway/default.jsonl`.
+- `X-Conversation-Id: default` — any string, as long as you reuse it next turn. Vulcan allocates a session underneath it (a random 12-hex-char id) and stores the transcript at `~/.vulcan/sessions/gateway/<session_id>.jsonl`. A pointer at `~/.vulcan/sessions/gateway/_conversations/default.json` remembers which session your conversation is currently on — `/new` rotates that pointer to a fresh session without changing the id you send.
 - `"model": "claude-code"` — this is the runtime name, not a model name. The model *inside* `claude-code` is whatever you set in config.
 
-Send a follow-up using the same session id and the assistant will see the prior turn.
+Send a follow-up using the same conversation id and the assistant will see the prior turn.
 
 ## 6. Inspect the session
 
@@ -107,14 +107,14 @@ Vulcan treats slash commands as synthetic user messages. Try them the same way y
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: default" \
+  -H "X-Conversation-Id: default" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "/sessions"}]
   }'
 ```
 
-You'll get a list of every session Vulcan knows about. `/session default` shows the current session's transcript. `/help` lists every command.
+You'll get a list of every session under this conversation, one row per session, with the current one marked by `*`. `/status` shows the resolved session id. `/session <session_id>` prints that session's transcript. `/help` lists every command.
 
 ## 7. The payoff — switch agent runtime mid-conversation
 
@@ -145,21 +145,21 @@ Stop the gateway (`Ctrl+C`). Add a second runtime to `~/.vulcan/vulcan.json`:
 }
 ```
 
-Restart `uv run python run.py`, then, on the same `default` session, send:
+Restart `uv run python run.py`, then, on the same `default` conversation, send:
 
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: default" \
+  -H "X-Conversation-Id: default" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "/switch base-openai"}]
   }'
 ```
 
-From the next turn on, the same conversation runs on `base-openai` — plain Chat Completions, different tool surface, different reasoning loop. The JSONL transcript keeps growing in one file. Switch back with `/switch claude-code`.
+From the next turn on, the same conversation's current session runs on `base-openai` — plain Chat Completions, different tool surface, different reasoning loop. The JSONL transcript keeps growing in one file. Switch back with `/switch claude-code`. If you want a clean slate while keeping the same conversation id, run `/new` — it rotates to a fresh session and inherits the current runtime binding.
 
-That is the distinguishing move: not a model swap, but an agent-runtime swap, on the same session.
+That is the distinguishing move: not a model swap, but an agent-runtime swap, on the same conversation.
 
 ## Where next
 

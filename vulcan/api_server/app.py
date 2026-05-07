@@ -27,19 +27,24 @@ class MessageMiddleware(BaseHTTPMiddleware):
 
         body = await request.json()
         channel_id = GATEWAY_CHANNEL_ID
-        session_id = request.headers.get("x-session-id", "default")
+        conversation_id = request.headers.get("x-conversation-id", "default")
         text = body["messages"][-1]["content"]
         # The request's `model` is the runtime name. Treat it as an
-        # explicit rebind: persist to session meta first, then let the
-        # gateway pick it up normally. An empty / missing `model` leaves
-        # the existing binding (or the config default) untouched.
+        # implicit `/switch` for the current session of this conversation:
+        # resolve the session, persist the rebind to its meta. An empty
+        # or missing `model` leaves the existing binding untouched.
         runtime_name = body.get("model")
         if runtime_name:
+            session_id = self.gateway.session_manager.resolve_current_session(
+                channel_id,
+                conversation_id,
+                self.gateway.config.default_runtime,
+            )
             self.gateway.session_manager.set_session_runtime(
                 channel_id, session_id, runtime_name
             )
         logger.info(
-            f"chat: model={runtime_name} session={session_id} "
+            f"chat: model={runtime_name} conversation={conversation_id} "
             f"user_msg_len={len(text)}"
         )
 
@@ -52,7 +57,7 @@ class MessageMiddleware(BaseHTTPMiddleware):
         )
 
         completion = await self.gateway.invoke(
-            channel_id, session_id, user_message
+            channel_id, conversation_id, user_message
         )
         return JSONResponse(completion.model_dump())
 

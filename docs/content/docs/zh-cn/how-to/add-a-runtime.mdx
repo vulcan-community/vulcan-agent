@@ -111,6 +111,6 @@ my-runtime = ["my-sdk>=1.0.0"]
 }
 ```
 
-重启。在任意 channel 发 `/runtime` 就能看到 `my-runtime` 是 `enabled`。用户**按 session** 选用 —— `/switch my-runtime` 重绑当前对话,或者 API 调用方传 `"model": "my-runtime"`(middleware 会把它落进 session 的 meta sidecar)。其它 session 保持自己的绑定。想把你的 runtime 设为新 session 的回落值,就把 `vulcan.json` 顶层改成 `"default_runtime": "my-runtime"`。
+重启。在任意 channel 发 `/runtime` 就能看到 `my-runtime` 是 `enabled`。用户**按 session** 选用 —— `/switch my-runtime` 重绑 conversation 当前的 session,或者 API 调用方传 `"model": "my-runtime"`(middleware 会解析 conversation 当前的 session,把绑定落到那段 session 的 meta sidecar)。其它 session 保持自己的绑定。想把你的 runtime 设为全新 conversation 的回落值,就把 `vulcan.json` 顶层改成 `"default_runtime": "my-runtime"`。
 
 `history_message` 和 `message` 的语义、gateway 怎么从 session 日志里把它们拼出来——见 [消息流](/docs/explanation/message-flow)。

@@ -43,7 +43,10 @@ class UptimeCommand(BaseCommand):
         )
         self._gateway = gateway
 
-    def exec(self, args: list[str]) -> ChatCompletion:
+    def exec(
+        self, args: list[str], channel_id: str, conversation_id: str
+    ) -> ChatCompletion:
+        del args, channel_id, conversation_id  # Unused.
         seconds = int(time.monotonic() - _STARTED_AT)
         return self._reply(f"up for {seconds}s")
 ```
@@ -52,7 +55,7 @@ The contract:
 
 - `command` — the text after the `/`. `match_command` compares against the first whitespace-separated token, so `/uptime` and `/uptime foo` both route here.
 - `description` — one line, used by `/help`. Include the usage shape.
-- `exec(args)` — `args` is everything after the command token, split on whitespace. Return a `ChatCompletion`. `self._reply(str)` wraps a string into the conventional `vulcan-system` completion shape every command uses.
+- `exec(args, channel_id, conversation_id)` — `args` is everything after the command token, split on whitespace. `channel_id` identifies the inbound transport; `conversation_id` is the caller's stable address (same across `/new`). Commands that need the concrete session for this turn can call `self._current_session_id(channel_id, conversation_id)` to resolve (and lazily install) it. Return a `ChatCompletion`. `self._reply(str)` wraps a string into the conventional `vulcan-system` completion shape every command uses.
 
 ## 3. Register it in the gateway
 
@@ -88,7 +91,7 @@ def _register_commands(self) -> None:
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: default" \
+  -H "X-Conversation-Id: default" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "/uptime"}]

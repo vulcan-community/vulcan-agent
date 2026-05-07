@@ -29,7 +29,7 @@ client = OpenAI(
 reply = client.chat.completions.create(
     model="claude-code",
     messages=[{"role": "user", "content": "你好"}],
-    extra_headers={"X-Session-Id": "my-session"},
+    extra_headers={"X-Conversation-Id": "my-conversation"},
 )
 print(reply.choices[0].message.content)
 ```
@@ -37,15 +37,15 @@ print(reply.choices[0].message.content)
 几件事要知道:
 
 - **`model` 是 runtime 名字,不是 LLM。** 填一个你启用了的 runtime——在任意 channel 发 `/runtime` 就能看到列表(`claude-code`、`codex`、`base-openai`……)。你传进去的这个字符串决定这一轮由哪个 agent runtime 处理。
-- **`X-Session-Id` 是把多轮串起来的关键。** 每次都传同一个,Vulcan 会把之前的对话作为 history 回放给 runtime。不传就走 `default` session。HTTP 这条路在 gateway 里 `channel_id` 固定是 `"gateway"`。
-- **`model` 就是隐式的 `/switch`。** Middleware 会在派发**之前**把 `body["model"]` 写进 session 的 `.meta.json` sidecar,后续同一个 `X-Session-Id` 上的 turn 只要不换 `model`,就一直跑在这个 runtime 上。`"model"` 省掉不传时保持现有绑定;从未绑定过、又不传 `"model"` 的全新 session 回落到 `vulcan.json` 里的 `config.default_runtime`。
+- **`X-Conversation-Id` 是把多轮串起来的关键。** 每次都传同一个,Vulcan 会把之前的对话作为 history 回放给 runtime。不传就走 `default` conversation。HTTP 这条路在 gateway 里 `channel_id` 固定是 `"gateway"`。conversation id 是稳定的 —— `/new` 只是在它底下把 *session* 轮换成一份新的 transcript,你传的 id 不变。
+- **`model` 是对 conversation 当前 session 的隐式 `/switch`。** Middleware 先解析 conversation 当前的 session,在派发**之前**把 `body["model"]` 写进那段 session 的 `.meta.json` sidecar。后续同一个 `X-Conversation-Id` 上的 turn 只要不换 `model`,就一直跑在这个 runtime 上。`"model"` 省掉不传时保持现有绑定;还没有指针、又不传 `"model"` 的全新 conversation 回落到 `vulcan.json` 里的 `config.default_runtime`。
 
 ## 3. 等价的 `curl`
 
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: my-session" \
+  -H "X-Conversation-Id: my-conversation" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "你好"}]
@@ -54,17 +54,17 @@ curl http://localhost:4000/v1/chat/completions \
 
 ## 从 API 切换 runtime
 
-两种办法,都是按 session 的:
+两种办法,都是作用在 conversation 当前 session 上:
 
-1. **传一个不一样的 `model`。** Middleware 派发前先把它落到当前 session 的 meta 里,下一次同 `X-Session-Id` 的请求哪怕不传 `model`,也会继续走新 runtime。
-2. **把 `/switch <name>` 当消息发。** 效果一样,只是从聊天侧触发。不同飞书 chat、不同 `X-Session-Id` 各自保留自己的绑定 —— `/switch` 只影响发命令的那个 session。
+1. **传一个不一样的 `model`。** Middleware 解析出当前 session,派发前先把它落到那段 session 的 meta 里,下一次同 `X-Conversation-Id` 的请求哪怕不传 `model`,也会继续走新 runtime。
+2. **把 `/switch <name>` 当消息发。** 效果一样,只是从聊天侧触发。不同飞书 chat、不同 `X-Conversation-Id` 各自保留自己的绑定 —— `/switch` 只影响发命令的那个 conversation 当前的 session。
 
 ```python
 client.chat.completions.create(
-    model="claude-code",   # 处理这轮 /switch 同时重绑这个 session
+    model="claude-code",   # 处理这轮 /switch 同时重绑当前 session
     messages=[{"role": "user", "content": "/switch codex"}],
-    extra_headers={"X-Session-Id": "my-session"},
+    extra_headers={"X-Conversation-Id": "my-conversation"},
 )
 ```
 
-这一次之后,`my-session` 就绑在 `codex` 上。没有全局"当前 runtime"这回事 —— 别的 `X-Session-Id`、别的 channel 完全不受影响。
+这一次之后,`my-conversation` 当前的 session 就绑在 `codex` 上。没有全局"当前 runtime"这回事 —— 别的 `X-Conversation-Id`、别的 channel 完全不受影响。

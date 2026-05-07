@@ -21,10 +21,12 @@ class RuntimeCommand(BaseCommand):
         self._gateway = gateway
 
     def exec(
-        self, args: list[str], channel_id: str, session_id: str
+        self, args: list[str], channel_id: str, conversation_id: str
     ) -> ChatCompletion:
+        del args
         mgr = self._gateway.runtime_manager
         sess = self._gateway.session_manager
+        session_id = self._current_session_id(channel_id, conversation_id)
         curr = (
             sess.get_session_runtime(channel_id, session_id)
             or self._gateway.config.default_runtime

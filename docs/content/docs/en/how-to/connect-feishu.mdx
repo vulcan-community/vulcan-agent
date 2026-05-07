@@ -37,7 +37,7 @@ Open `~/.vulcan/vulcan.json` and add a `feishu` block under `channels`:
 }
 ```
 
-The channel has no runtime field of its own — runtime selection is per-session. A fresh Feishu session uses `config.default_runtime` (top-level in `vulcan.json`), and from inside any chat you can rebind just that session with `/switch <name>`.
+The channel has no runtime field of its own — runtime selection is per-session. Feishu uses `conversation_id = chat_id`, so each chat is a stable conversation across `/new`. A fresh chat's first session uses `config.default_runtime` (top-level in `vulcan.json`); from inside any chat you can rebind just that session with `/switch <name>`.
 
 ## 4. Restart and @ the bot
 

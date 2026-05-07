@@ -28,19 +28,33 @@ class BaseCommand(ABC):
 
     @staticmethod
     def _reply(text: str) -> ChatCompletion:
-        """Wrap `text` into the conventional `vulcan-system` ChatCompletion
-        — every command replies with this shape, so subclasses just build
-        a string and call `self._reply(...)`."""
+        """Wrap `text` into the conventional `vulcan-system` ChatCompletion.
+        Every command replies with this shape, so subclasses just build a
+        string and call `self._reply(...)`.
+        """
         return system_completion(text)
+
+    def _current_session_id(self, channel_id: str, conversation_id: str) -> str:
+        """Resolve the current session id for the calling conversation,
+        creating a fresh one if this is the first touch. Commands that
+        mutate session-level state (`/switch`, `/status`, `/runtime`)
+        use this to avoid duplicating the `resolve_current_session` call
+        pattern at each site.
+        """
+        gw = self._gateway
+        return gw.session_manager.resolve_current_session(
+            channel_id, conversation_id, gw.config.default_runtime
+        )
 
     @abstractmethod
     def exec(
-        self, args: list[str], channel_id: str, session_id: str
+        self, args: list[str], channel_id: str, conversation_id: str
     ) -> ChatCompletion:
         """Run the command.
 
-        `channel_id` + `session_id` identify the session that issued the
-        command. Commands that mutate session state (e.g. `/switch`) need
-        them; stateless commands (e.g. `/version`, `/help`) can ignore.
+        `channel_id` identifies the front-end transport (API server,
+        Feishu, ...). `conversation_id` is the user-facing stable address
+        — the same across `/new` rotations. Commands that need the
+        concrete session can resolve it via `self._current_session_id()`.
         """
         ...

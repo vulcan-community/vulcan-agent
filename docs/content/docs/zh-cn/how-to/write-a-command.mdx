@@ -43,7 +43,10 @@ class UptimeCommand(BaseCommand):
         )
         self._gateway = gateway
 
-    def exec(self, args: list[str]) -> ChatCompletion:
+    def exec(
+        self, args: list[str], channel_id: str, conversation_id: str
+    ) -> ChatCompletion:
+        del args, channel_id, conversation_id  # 不用。
         seconds = int(time.monotonic() - _STARTED_AT)
         return self._reply(f"up for {seconds}s")
 ```
@@ -52,7 +55,7 @@ class UptimeCommand(BaseCommand):
 
 - `command`——`/` 后面那个词。`match_command` 对的是空格切分后第一个 token,所以 `/uptime` 和 `/uptime foo` 都会走到这儿。
 - `description`——一行话,`/help` 会用。把用法写上。
-- `exec(args)`——`args` 是命令 token 之后按空格切出来的列表。返回一个 `ChatCompletion`。`self._reply(str)` 把字符串包成每个命令都在用的那种 `vulcan-system` completion 形状。
+- `exec(args, channel_id, conversation_id)`——`args` 是命令 token 之后按空格切出来的列表;`channel_id` 标识入站传输;`conversation_id` 是调用方那个稳定的地址(跨 `/new` 不变)。要拿这一轮真正用到的 session id,调 `self._current_session_id(channel_id, conversation_id)` 即可(必要时会懒装一个)。返回一个 `ChatCompletion`。`self._reply(str)` 把字符串包成每个命令都在用的那种 `vulcan-system` completion 形状。
 
 ## 3. 在 gateway 里注册
 
@@ -88,7 +91,7 @@ def _register_commands(self) -> None:
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: default" \
+  -H "X-Conversation-Id: default" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "/uptime"}]

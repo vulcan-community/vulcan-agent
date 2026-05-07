@@ -18,19 +18,34 @@ description: Gateway 配置文件 —— 所有字段、类型与默认值。
 
 ## 按 session 的运行时绑定
 
-运行时选择是**按 session** 的，不是全局也不是按 channel。每个 session 的绑定落在 JSONL transcript 旁边的 sidecar 文件 `<session_id>.meta.json` 里：
+运行时选择是**按 session** 的，不是全局也不是按 channel —— 而 session 又挂在一个稳定的 conversation 指针下面轮换，所以绑定实际上活在用户侧地址的下一层。
 
-```json
-{"runtime_name": "claude-code"}
+文件布局：
+
+```
+~/.vulcan/sessions/
+├── <channel_id>/
+│   ├── _conversations/
+│   │   └── <conversation_id>.json     # {"current_session_id": "..."}
+│   ├── <session_id>.jsonl             # transcript
+│   └── <session_id>.meta.json         # {"runtime_name": "...", "conversation_id": "..."}
 ```
 
-三处会写入这个文件：
+每个 session 的 `.meta.json` sidecar 既带运行时绑定，也带一个指回 conversation 的反向指针：
 
-- `/switch <name>` —— 从当前 session 显式重绑。
-- API middleware —— 请求体的 `"model"` 字段非空时，在 gateway 派发之前就先持久化。
-- `Gateway.invoke_stream` —— 面对还没绑过的新 session，写入 `config.default_runtime`。
+```json
+{"runtime_name": "claude-code", "conversation_id": "default"}
+```
 
-`Session.runtime_name`（pydantic）在内存中承载绑定；meta 文件缺失时为 `None`。
+`<channel_id>/_conversations/<conversation_id>.json` 记录这个 conversation 当前挂在哪段 session 上。`/new` 分配一段新 session 并轮换这个指针（沿用上一段 session 的 `runtime_name`）；`/resume <session_id>` 把指针改到同 conversation 下的一段已有 session。这两个命令都不动 sidecar 上的运行时绑定。
+
+三处会写入运行时绑定：
+
+- `/switch <name>` —— 对 conversation 当前 session 做显式重绑。
+- API middleware —— 请求体的 `"model"` 字段非空时，在 gateway 派发前就先落到 conversation 当前 session 的 meta 里。
+- `Gateway.invoke_stream` / `LocalSessionManager.resolve_current_session` —— 这个 conversation 还没有指针（首次接触）时，分配一段绑定到 `config.default_runtime` 的新 session 并写指针。
+
+`Session.runtime_name`（pydantic）在内存中承载绑定；meta 文件缺失时为 `None`。完整存储约定见 [Sessions & conversations](./sessions)。
 
 ## `RuntimeConfig`
 

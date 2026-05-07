@@ -16,52 +16,106 @@ Arguments are the remaining whitespace-separated tokens.
 
 ## Registered commands
 
-| Name        | Arguments                                    | Description                                                                                            |
-| ----------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `/new`      | —                                            | Clear the current session (delete its `.jsonl` + `.meta.json`).                                        |
-| `/switch`   | `<runtime_name>`                             | Switch **this session's** runtime.                                                                     |
-| `/sessions` | —                                            | List sessions.                                                                                         |
-| `/session`  | `<channel>/<session_id>` or `<session_id>`   | Show a session's raw JSONL.                                                                            |
-| `/runtime`  | —                                            | List every known runtime and its status (`enabled` / `disabled` / `uninstalled`).                      |
-| `/version`  | —                                            | Show the installed `vulcan-agent` version.                                                             |
-| `/status`   | —                                            | Show this session's binding plus its runtime and model configuration.                                  |
-| `/help`     | —                                            | List all available slash commands.                                                                     |
+| Name             | Arguments                                    | Description                                                                                  |
+| ---------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `/new`           | —                                            | Rotate to a fresh session on this conversation; inherits the previous session's runtime.     |
+| `/resume`        | `<session_id>`                               | Point this conversation at an existing session (must belong to the same conversation).       |
+| `/switch`        | `<runtime_name>`                             | Switch **the current session's** runtime binding.                                            |
+| `/sessions`      | —                                            | List sessions under the current conversation, newest first.                                  |
+| `/conversations` | —                                            | List every conversation across all channels.                                                 |
+| `/session`       | `<channel>/<session_id>` or `<session_id>`   | Show a session's raw JSONL.                                                                  |
+| `/runtime`       | —                                            | List every known runtime and its status (`enabled` / `disabled` / `uninstalled`).            |
+| `/version`       | —                                            | Show the installed `vulcan-agent` version.                                                   |
+| `/status`        | —                                            | Show this conversation's current session plus its runtime and model configuration.           |
+| `/help`          | —                                            | List all available slash commands.                                                           |
 
-Order is the registration order in `Gateway._register_commands`: `new`, `switch`, `sessions`, `session`, `runtime`, `version`, `status`, `help`.
+Order is the registration order in `Gateway._register_commands`: `new`, `resume`, `switch`, `sessions`, `conversations`, `session`, `runtime`, `version`, `status`, `help`.
+
+## Two-layer identity
+
+A **conversation** is the stable user-facing address (Feishu `chat_id`, HTTP `X-Conversation-Id` header). It persists across `/new`. A **session** is one concrete transcript — a `<session_id>.jsonl` + `<session_id>.meta.json` pair keyed by a random 12-hex-char id. Each conversation carries a pointer at `<channel_id>/_conversations/<conversation_id>.json` that names its current session. `/new` rotates that pointer; `/resume` moves it to an existing session. See [Sessions & conversations](./sessions) for the storage layout.
 
 ## `/new`
 
-Clear the current session — deletes both the transcript `.jsonl` and the `.meta.json` sidecar for `(channel_id, session_id)`. The next real message starts a fresh session bound to `config.default_runtime`.
+Allocate a fresh session on this conversation, move the conversation pointer to it, and **inherit** the previous session's runtime binding (falls back to `config.default_runtime` if there was no previous session).
 
 **Arguments** — none.
 
 **Behavior**
 
-Calls `session_manager.delete_session(channel_id, session_id)`. Missing sessions are treated as a legitimate state, not an error.
+Calls `session_manager.rotate_current_session(channel_id, conversation_id, default_runtime)`. This writes a new `<session_id>.jsonl` + `.meta.json` pair and overwrites the `_conversations/<conversation_id>.json` pointer. The prior session's transcript is left on disk unchanged — you can get back to it with `/resume <old_session_id>`.
 
 **Output**
 
 Success:
 
 ```
-Cleared session <channel_id>/<session_id>. Next message starts fresh.
-```
-
-Nothing to clear:
-
-```
-No session to clear for <channel_id>/<session_id>.
+Started new session <session_id> (runtime: <runtime_name>).
 ```
 
 Unexpected failure:
 
 ```
-Failed to clear session: <ExceptionType>: <message>
+Failed to start new session: <ExceptionType>: <message>
+```
+
+## `/resume`
+
+Point the current conversation at an existing session. Rejects cross-conversation resume — the target session's meta `conversation_id` back-pointer must match the caller's conversation.
+
+**Arguments**
+
+| Position | Name         | Required | Description                                                 |
+| -------- | ------------ | -------- | ----------------------------------------------------------- |
+| 0        | `session_id` | yes      | Id of an existing session in the same channel. 12 hex chars. |
+
+**Behavior**
+
+1. Verify the session exists in the current channel.
+2. Read the session's meta and confirm its `conversation_id` matches the caller's conversation.
+3. Call `session_manager.set_current_session_id(channel_id, conversation_id, sid)` — rewrites the conversation pointer file only; the session's own meta is untouched.
+
+**Output**
+
+Success:
+
+```
+Resumed session <session_id> (runtime: <runtime_name>).
+```
+
+Missing positional argument:
+
+```
+Usage: /resume <session_id>. Run /sessions to see available ids.
+```
+
+Session not found in this channel:
+
+```
+Session '<session_id>' not found in channel '<channel_id>'.
+```
+
+Session has no meta (cannot confirm ownership):
+
+```
+Session '<session_id>' has no meta — cannot confirm it belongs to this conversation.
+```
+
+Session belongs to a different conversation:
+
+```
+Session '<session_id>' belongs to a different conversation ('<actual>'), not '<conversation_id>'.
+```
+
+Unexpected failure:
+
+```
+Failed to resume: <ExceptionType>: <message>
 ```
 
 ## `/switch`
 
-Rebind **the current session** to a different runtime. Other sessions keep their own bindings — runtime selection is per-session and different chats can run on different runtimes simultaneously.
+Rebind **the current session** to a different runtime. Other sessions keep their own bindings — runtime selection is per-session. The conversation pointer is untouched; only the target session's `.meta.json` is rewritten.
 
 **Arguments**
 
@@ -71,7 +125,7 @@ Rebind **the current session** to a different runtime. Other sessions keep their
 
 **Behavior**
 
-Looks up the runtime via `RuntimeManager.get_runtime(name)`; if it returns `None`, the reply explains the runtime is not enabled and the binding is unchanged. Otherwise calls `session_manager.set_session_runtime(channel_id, session_id, name)`, which rewrites the session's `.meta.json` sidecar. The body is wrapped in a broad `try/except` so unexpected state errors are surfaced to the caller instead of crashing the request.
+Looks up the runtime via `RuntimeManager.get_runtime(name)`; if it returns `None`, the reply explains the runtime is not enabled and the binding is unchanged. Otherwise resolves the current session id through the conversation pointer and calls `session_manager.set_session_runtime(channel_id, session_id, name)`, rewriting that session's `.meta.json` sidecar. The body is wrapped in a broad `try/except` so unexpected state errors are surfaced to the caller instead of crashing the request.
 
 **Output**
 
@@ -99,22 +153,49 @@ Failed to switch: <ExceptionType>: <message>
 
 ## `/sessions`
 
-List every session file under `<home>/sessions/`, sorted by file creation time (newest first).
+List sessions belonging to the **current conversation** (other conversations' sessions are not shown), newest first by `.jsonl` ctime.
 
 **Arguments** — none.
 
 **Output**
 
 ```
-Sessions:
-  <channel>/<session_id>  <ISO-8601 ctime>
+Sessions for <channel>/<conversation> (current=<session_id>):
+  [*] <session_id>  <ISO-8601 ctime>  runtime=<name>
+  [ ] <session_id>  <ISO-8601 ctime>  runtime=<name>
   ...
 ```
+
+`[*]` marks the conversation's current session. `runtime=—` if the session has no binding on disk. Empty listing:
+
+```
+Sessions for <channel>/<conversation> (current=<session_id>):
+  (none)
+```
+
+## `/conversations`
+
+List every conversation across every channel with a `_conversations/` directory. `[*]` marks the caller's own conversation.
+
+**Arguments** — none.
+
+**Output**
+
+```
+Conversations:
+  [*] <channel>/<conversation>  current=<session_id> runtime=<name> sessions=<count>
+  [ ] <channel>/<conversation>  current=<session_id> runtime=<name> sessions=<count>
+  ...
+```
+
+- `current=` is the session the conversation pointer currently names.
+- `runtime=` is the bound runtime on that current session (`—` if unbound).
+- `sessions=` is the count of sessions whose meta's `conversation_id` back-pointer matches.
 
 Empty listing:
 
 ```
-Sessions:
+Conversations:
   (none)
 ```
 
@@ -131,11 +212,29 @@ Print a session's raw JSONL transcript.
 **Behavior**
 
 - With `/`: resolves to `<home>/sessions/<channel>/<session_id>.jsonl`.
-- Without `/`: globs `<home>/sessions/*/<session_id>.jsonl` and asserts exactly one match.
+- Without `/`: globs `<home>/sessions/*/<session_id>.jsonl`. Zero or multiple matches reply with an error instead of crashing.
 
 **Output**
 
 The file's content, followed by a trailing newline.
+
+Error replies:
+
+```
+Usage: /session <channel>/<session_id> or /session <session_id>. Run /sessions to see available ids.
+```
+
+```
+Session '<spec>' not found.
+```
+
+```
+Session id '<spec>' matches multiple channels: [<ch>, <ch>, ...]. Use /session <channel>/<session_id>.
+```
+
+```
+Failed to read session: <ExceptionType>: <message>
+```
 
 ## `/runtime`
 
@@ -152,7 +251,7 @@ Runtimes:
   ...
 ```
 
-- `[*]` marks **the current session's** runtime — resolved from the session's sidecar meta, falling back to `config.default_runtime` when no binding has been written yet. Only rows whose status is `enabled` can be marked.
+- `[*]` marks **the current session's** runtime — resolved by following the conversation pointer to its current session, then reading that session's sidecar meta, falling back to `config.default_runtime` when no binding has been written yet. Only rows whose status is `enabled` can be marked.
 - `<status>` is one of `enabled`, `disabled`, `uninstalled` — see [Runtimes](./runtimes) for definitions.
 - Name field is left-padded to 16 characters.
 
@@ -170,13 +269,14 @@ vulcan-agent <VERSION>
 
 ## `/status`
 
-Report the current session's binding, the runtime it resolves to, and the model configuration that runtime is using.
+Report the calling conversation, the session it currently points at, that session's runtime binding, and the model configuration that runtime is using.
 
 **Arguments** — none.
 
 **Behavior**
 
-- Reads the session's runtime binding via `session_manager.get_session_runtime()`. If none, the resolved runtime falls back to `config.default_runtime` and the session field is tagged as unbound.
+- Resolves the conversation's current session via the conversation pointer (auto-installing a pointer + fresh session bound to `config.default_runtime` on first touch).
+- Reads the session's runtime binding via `session_manager.get_session_runtime()`. If none, the resolved runtime falls back to `config.default_runtime` and the binding field is tagged as unbound.
 - Counts non-empty lines in the session's `.jsonl` directly — missing files count as `0`.
 - Looks up the resolved runtime via `RuntimeManager.get_runtime(name)`. When it is `None`, `class` is `—` and `status` is taken from `runtime_manager.status` (or `not-registered`).
 - Pulls `ModelConfig` from `runtime.agent_config.model`. The `api_key` field is never echoed — only `set` vs `(empty — using SDK default)`.
@@ -184,11 +284,12 @@ Report the current session's binding, the runtime it resolves to, and the model 
 **Output**
 
 ```
-Session:
-  channel    : <channel_id>
-  id         : <session_id>
-  items      : <int count of JSONL lines>
-  runtime    : <runtime_name bound to this session, or '(unbound → default: <default_runtime>)'>
+Conversation:
+  channel         : <channel_id>
+  conversation    : <conversation_id>
+  current session : <session_id>
+  items           : <int count of JSONL lines>
+  runtime         : <runtime_name bound to this session, or '(unbound → default: <default_runtime>)'>
 
 Runtime:
   name       : <resolved runtime name>

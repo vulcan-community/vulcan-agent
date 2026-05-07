@@ -49,15 +49,15 @@ This page walks each concern, says what it is for, and — more usefully — say
 
 There are two entry points and one of them is a wrapper over the other:
 
-- `invoke_stream(channel_id, session_id, user_message) -> AsyncIterator[SessionItem]` is the real thing. It yields events as the runtime produces them.
+- `invoke_stream(channel_id, conversation_id, user_message) -> AsyncIterator[SessionItem]` is the real thing. It yields events as the runtime produces them.
 - `invoke(...)` drains the stream, concatenates assistant text, and wraps the result in a `ChatCompletion` for clients that can't handle streaming.
 
-Neither takes a `runtime_name` argument — runtime selection is per-session, resolved from the session's sidecar meta (with `config.default_runtime` as the fallback).
+Neither takes a `runtime_name` argument — runtime selection is per-session, resolved by following the conversation's current-session pointer to a sidecar meta (with `config.default_runtime` as the fallback).
 
 The streaming path is seven steps and worth quoting directly from the source because each step is a distinct responsibility:
 
-1. **Match a slash command.** If the message starts with `/`, hand off to `CommandManager` and return the command's reply. This short-circuits before the runtime is even consulted — and before the message is persisted, so commands never pollute a session. `/switch` mutates the session's sidecar meta here and returns.
-2. **Resolve the session's runtime.** Read the session's `.meta.json` sidecar; fall back to `config.default_runtime` if it's missing. `create_session` is idempotent — it touches the JSONL if missing and writes the meta sidecar with the resolved name.
+1. **Match a slash command.** If the message starts with `/`, hand off to `CommandManager` with `(args, channel_id, conversation_id)` and return the command's reply. This short-circuits before the runtime is even consulted — and before the message is persisted, so commands never pollute a session. `/switch`, `/new`, `/resume` each mutate different pieces of session/conversation state here and return.
+2. **Resolve the conversation's current session.** `resolve_current_session(channel_id, conversation_id, default_runtime)` reads the `_conversations/<conversation_id>.json` pointer; if missing (first touch), it allocates a fresh session bound to `config.default_runtime`, writes the pointer, and returns the new id. Then read that session's `.meta.json` sidecar for its `runtime_name`; fall back to `config.default_runtime` if missing.
 3. **Assemble history.** Call `session_manager.assembly_history_messages(channel_id, session_id)` *before* writing the current turn, so the history the runtime sees doesn't contain the message the runtime is about to answer.
 4. **Persist the user message** to the JSONL file.
 5. **Build an `InvocationContext`** — exactly three fields: `channel_id`, `history_message`, `message`.
@@ -70,9 +70,9 @@ Step 3-before-4 is a small detail with a large consequence: the runtime's input 
 
 The API server (`vulcan/api_server/app.py`) and channels (`vulcan/gateway/channels/`) look like different code paths, but they terminate at the same place.
 
-The API server mounts `MessageMiddleware` over the LiteLLM proxy app. It intercepts `POST /v1/chat/completions`, pulls `x-session-id` from headers, and — if the request body carries a `"model"` — writes it to the session's sidecar meta *before* calling the gateway. This makes `"model"` an implicit `/switch` for that session: subsequent turns on the same `x-session-id` stay on that runtime until the client picks a different one. A missing or empty `"model"` preserves the existing binding. The `channel_id` is always the constant `GATEWAY_CHANNEL_ID = "gateway"`. The API server does not stream.
+The API server mounts `MessageMiddleware` over the LiteLLM proxy app. It intercepts `POST /v1/chat/completions`, pulls `x-conversation-id` from headers (defaulting to `"default"`), and — if the request body carries a `"model"` — resolves the conversation's current session and writes the model name to that session's sidecar meta *before* calling the gateway. This makes `"model"` an implicit `/switch` for the conversation's current session: subsequent turns on the same `x-conversation-id` stay on that runtime until the client picks a different one. A missing or empty `"model"` preserves the existing binding. The `channel_id` is always the constant `GATEWAY_CHANNEL_ID = "gateway"`. The API server does not stream.
 
-Channels do stream. A `BaseChannel` (`vulcan/gateway/channels/base_channel.py`) is a transport adapter: Feishu, Slack later, Discord later. Its `invoke_stream(session_id, user_message)` is marked `@final` and forwards straight to `gateway.invoke_stream(self.name, session_id, user_message)`. A channel decides how to render the incoming `SessionItem` stream — Feishu paints a progressive CardKit card so users watch thinking, tool calls, and text deltas land as they happen.
+Channels do stream. A `BaseChannel` (`vulcan/gateway/channels/base_channel.py`) is a transport adapter: Feishu, Slack later, Discord later. Its `invoke_stream(conversation_id, user_message)` is marked `@final` and forwards straight to `gateway.invoke_stream(self.name, conversation_id, user_message)`. A channel decides how to render the incoming `SessionItem` stream — Feishu paints a progressive CardKit card so users watch thinking, tool calls, and text deltas land as they happen.
 
 Both paths converge at `Gateway.invoke_stream`. There is exactly one code path for producing a response, regardless of origin. That is why the control plane (commands) only needs to live in one place, why the session store only needs to know about `channel_id`, and why adding Slack later is mostly a rendering problem.
 
@@ -98,7 +98,7 @@ Runtimes are documented in their own page: [Why agent runtimes, not models](/doc
 
 ## Session — transcript, not state
 
-The session manager holds the only piece of persistent state in the system: a JSONL file per `(channel_id, session_id)` pair, at `~/.vulcan/sessions/<channel_id>/<session_id>.jsonl`, plus a small `<session_id>.meta.json` sidecar next to it that carries the session's runtime binding. Each JSONL line is one `SessionItem` — a message, a tool call, a tool output, a reasoning block. The transcript is append-only during normal operation; the sidecar is overwritten on rebind.
+The session manager holds the only piece of persistent state in the system: a JSONL file per session at `~/.vulcan/sessions/<channel_id>/<session_id>.jsonl`, a `<session_id>.meta.json` sidecar next to it carrying `{runtime_name, conversation_id}`, and a tiny pointer file at `<channel_id>/_conversations/<conversation_id>.json` that names which session the conversation is currently attached to. Each JSONL line is one `SessionItem` — a message, a tool call, a tool output, a reasoning block. The transcript is append-only; the sidecar is overwritten on rebind; the pointer file rotates on `/new` / `/resume`.
 
 This is an opinionated choice. The alternatives — a SQLite DB, a structured object model, a vendor-specific conversation store — would all be more powerful. JSONL is not more powerful; it is more honest. You can `cat` a session and read it. You can `grep` across all your sessions. You can delete a bad turn with `sed`. You can back the directory up with `cp -r`. The format is the documentation.
 

@@ -53,17 +53,23 @@ Vulcan 恰好反过来做。gateway 把 history 渲染成一个 blob,**一次**,
 
 (有一处小的不一致:第 7 步把 assistant 文本当作新的 `Message` 落盘,但第 6 步也已经把同样的文本逐步 yield 出去了。如果 channel 自己也维护一份 transcript,要么消费第 7 步那条累计消息,要么自己去重——看 channel 实现里的做法。)
 
+## 为什么是 conversation + session 两层
+
+身份分两层。**conversation** 是稳定的用户侧地址——飞书的 `chat_id`、HTTP 的 `X-Conversation-Id` header——跨 `/new` 保持不变。**session** 是具体的 transcript——一对 `<session_id>.jsonl` + `<session_id>.meta.json`,id 是 12 位十六进制字符随机生成。每个 conversation 在 `<channel_id>/_conversations/<conversation_id>.json` 有一个指针文件,记它当前挂的 session;`/new` 把指针换到新分配的 session,`/resume` 把指针移到已有的 session。运行时绑定落在 session 上而不是 conversation 上——正因如此,`/new` 能沿用上一段 session 的绑定,而 conversation 本身从不需要"知道"运行时这回事。
+
 ## 为什么 `/switch` 很简单
 
 因为 runtime 跨 turn 无状态,切换它就没东西可交接。
 
-Runtime 绑定落在 session 自己身上——JSONL transcript 旁边的 sidecar 文件 `<session_id>.meta.json`。`SwitchCommand` 通过 `session_manager.set_session_runtime(channel_id, session_id, name)` 把新名字写到那个文件里,然后返回。下一次 `Gateway.invoke_stream` 走到第 2 步,从 meta 读到新绑定。新 runtime 读到的是**同一份** `<previous_conversations>` blob——里面原 runtime 的回复只是普通消息行,和其它消息无法区分——然后继续这段对话。其它 session 各自保留自己的绑定;`/switch` 严格是按 session 的操作。
+Runtime 绑定落在 session 自己身上——JSONL transcript 旁边的 sidecar 文件 `<session_id>.meta.json`。`SwitchCommand` 通过指针解析出 conversation 当前的 session,再通过 `session_manager.set_session_runtime(channel_id, session_id, name)` 把新名字写到那段 session 的 meta 里,然后返回。下一次 `Gateway.invoke_stream` 解析 session 并读 meta 时就拿到新绑定。新 runtime 读到的是**同一份** `<previous_conversations>` blob——里面原 runtime 的回复只是普通消息行,和其它消息无法区分——然后继续这段对话。其它 session 各自保留自己的绑定;`/switch` 严格是按 session 的操作。
 
-三个入口可以写入这份绑定:
+三个入口可以写入运行时绑定:
 
-- `/switch <name>` —— 在对话里显式重绑。
-- API middleware —— HTTP 请求的 `"model"` 字段非空时,gateway 调用前先写入。API 请求相当于一次隐式 `/switch`。
-- Gateway 自身 —— 面对还未绑定过的新 session,第 2 步会把 `config.default_runtime` 写进去,保证从第一条真消息起 session 就一定有运行时。
+- `/switch <name>` —— 对 conversation 当前 session 做显式重绑。
+- `MessageMiddleware`(API 路径)—— HTTP 请求的 `"model"` 字段非空时,middleware 先解析 conversation 当前 session,在 gateway 被调用前就 `set_session_runtime`。带 `"model"` 的 API 请求相当于一次隐式 `/switch`。
+- `LocalSessionManager.resolve_current_session`(gateway 的新 session 回落)—— conversation 还没指针时,分配一段绑定到 `config.default_runtime` 的新 session 并写指针。保证 session 从第一条真消息起就一定有运行时。
+
+`/new` 是另一条机制:它**不动**任何已有 session 的 meta。它分配一段新 session,写那段 session 的 meta(沿用上一段 session 的 `runtime_name`),再覆写 conversation 指针文件。旧 session 的 meta 和 transcript 原样留在盘上——`/resume <old_session_id>` 能找回它们。
 
 对比一下如果 runtime 背着 session state 会是什么样:每个 runtime 要一份序列化契约、跨 schema 要一条迁移路径、tool call 中途切换要专门处理、还得告诉新 runtime "历史里 assistant 那些 turn 其实是另一栈产生的"。把 runtime 做成无状态、绑定做成 session 级别的元数据,这些全都不存在。
 
@@ -73,13 +79,13 @@ Runtime 绑定落在 session 自己身上——JSONL transcript 旁边的 sideca
 
 session 的 key 是 `(channel_id, session_id)`,不是 `(user_id, session_id)`。这个选择背后的问题是"对话活在哪里",而不是"谁拥有对话"。
 
-- HTTP API 用 `channel_id = "gateway"`(常量 `GATEWAY_CHANNEL_ID`)。session id 来自 `x-session-id` header,调用方自己选。
-- 飞书用 `channel_id = "feishu"`,按 chat 或按用户分 session,它自己决定。
+- HTTP API 用 `channel_id = "gateway"`(常量 `GATEWAY_CHANNEL_ID`)。conversation id 来自 `X-Conversation-Id` header,调用方自己选。
+- 飞书用 `channel_id = "feishu"`、`conversation_id = chat_id`。
 - 将来的 Slack channel 会用 `channel_id = "slack"`,再定自己的方案。
 
-每种入站传输都有独立命名空间。飞书一段 id 为 `default` 的 session,和 HTTP 一段 id 为 `default` 的 session,在不同目录下的不同文件里,彼此不相干。这个颗粒度是对的,因为**传输**决定了用户怎么自报身份、以及 session 怎么对应外部对话。绑到 `user_id` 会要求每个 channel 都接入一个全局用户系统;绑到 `channel_id` 则让每个 channel 自己定义它认为的"身份"。
+每种入站传输都有独立命名空间。飞书一个 id 为 `default` 的 conversation,和 HTTP 一个 id 为 `default` 的 conversation,指针文件落在不同目录,彼此不相干。这个颗粒度是对的,因为**传输**决定了用户怎么自报身份、以及 conversation 怎么对应外部聊天线。绑到 `user_id` 会要求每个 channel 都接入一个全局用户系统;绑到 `channel_id` 则让每个 channel 自己定义它认为的"身份"。
 
-这也意味着 Vulcan 目前在每个 channel 内是单租户的。飞书多用户部署需要飞书 channel 把 session id 按 Lark 的 `open_id` 再做一层 namespace。那是 channel 级改动,不是 gateway 级的。
+这也意味着 Vulcan 目前在每个 channel 内是单租户的。飞书多用户部署需要飞书 channel 把 conversation id 按 Lark 的 `open_id` 再做一层 namespace。那是 channel 级改动,不是 gateway 级的。
 
 ## 事件流的形状
 

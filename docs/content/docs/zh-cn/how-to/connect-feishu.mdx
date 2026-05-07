@@ -37,7 +37,7 @@ uv sync --extra feishu
 }
 ```
 
-Channel 自己不再带 runtime 字段 —— runtime 是按 session 选的。新起的飞书 session 用 `config.default_runtime`（`vulcan.json` 顶层的字段），在任一聊天里发 `/switch <name>` 只会重绑当前这个 session。
+Channel 自己不再带 runtime 字段 —— runtime 是按 session 选的。飞书这边 `conversation_id = chat_id`，所以每个群/私聊就是一条跨 `/new` 不变的 conversation。新群的第一段 session 用 `config.default_runtime`（`vulcan.json` 顶层的字段），在任一聊天里发 `/switch <name>` 只会重绑当前这段 session。
 
 ## 4. 重启,然后 @ 它
 

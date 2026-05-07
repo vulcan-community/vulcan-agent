@@ -21,7 +21,7 @@ class SwitchCommand(BaseCommand):
         self._gateway = gateway
 
     def exec(
-        self, args: list[str], channel_id: str, session_id: str
+        self, args: list[str], channel_id: str, conversation_id: str
     ) -> ChatCompletion:
         try:
             if not args:
@@ -34,6 +34,7 @@ class SwitchCommand(BaseCommand):
                 return self._reply(
                     f"Runtime '{name}' is not enabled. See /runtime."
                 )
+            session_id = self._current_session_id(channel_id, conversation_id)
             self._gateway.session_manager.set_session_runtime(
                 channel_id, session_id, name
             )

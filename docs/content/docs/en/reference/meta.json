@@ -1,4 +1,4 @@
 {
   "title": "Reference",
-  "pages": ["commands", "runtimes", "channels", "config"]
+  "pages": ["commands", "sessions", "runtimes", "channels", "config"]
 }

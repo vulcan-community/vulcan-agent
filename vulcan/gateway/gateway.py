@@ -93,8 +93,12 @@ class Gateway:
             )
 
     def _register_commands(self) -> None:
+        from .commands.conversations.conversations import (
+            ConversationsCommand,
+        )
         from .commands.help.help import HelpCommand
         from .commands.new.new import NewCommand
+        from .commands.resume.resume import ResumeCommand
         from .commands.runtime.runtime import RuntimeCommand
         from .commands.session.session import SessionCommand
         from .commands.sessions.sessions import SessionsCommand
@@ -104,8 +108,10 @@ class Gateway:
 
         for cls in (
             NewCommand,
+            ResumeCommand,
             SwitchCommand,
             SessionsCommand,
+            ConversationsCommand,
             SessionCommand,
             RuntimeCommand,
             VersionCommand,
@@ -136,17 +142,19 @@ class Gateway:
     async def invoke_stream(
         self,
         channel_id: str,
-        session_id: str,
+        conversation_id: str,
         user_message: Message,
     ) -> AsyncIterator[SessionItem]:
         """Run one turn end-to-end and yield SessionItem stream as runtime
         produces them (text, thinking, tool_call, tool_output, ...).
 
-        Runtime selection lives entirely on the session's meta sidecar —
-        `/switch` mutates it, and callers that want to rebind explicitly
-        (e.g. the API middleware forwarding a request's `"model"` field)
-        write it directly via `session_manager.set_session_runtime()`
-        before calling this. The gateway itself only reads.
+        `conversation_id` is the stable address (Feishu chat_id, HTTP
+        `X-Conversation-Id` header). The gateway resolves it to the
+        current session id via the conversation pointer — that pointer
+        rotates on `/new` and `/resume`, so the same conversation_id can
+        map to different session files over time. Runtime selection is
+        per-session (lives in the session's meta sidecar), and `/switch`
+        mutates just that one session.
 
         Channels use this to render progressively. The non-streaming
         `invoke()` wraps this and aggregates into a ChatCompletion.
@@ -154,33 +162,29 @@ class Gateway:
         user_text = message_text(user_message)
 
         # 1. slash command match (control-plane, not saved to session).
-        #    `/switch` mutates the session meta here and returns.
         command = self.command_manager.match_command(user_text)
         if command:
             logger.info(f"command matched: /{command.command}")
             completion = command.exec(
-                command.parse_args(user_text), channel_id, session_id
+                command.parse_args(user_text), channel_id, conversation_id
             )
             cmd_text = completion.choices[0].message.content or ""
             yield assistant_message(cmd_text)
             return
 
-        # 2. resolve runtime for this session and ensure it exists.
-        #    priority: session meta > config.default_runtime.
-        #    create_session is idempotent — touches the jsonl if missing
-        #    and (re)writes the meta sidecar.
-        resolved_name = (
+        # 2. resolve the conversation's current session. First touch
+        #    installs a pointer + fresh session bound to default_runtime.
+        session_id = self.session_manager.resolve_current_session(
+            channel_id, conversation_id, self.config.default_runtime
+        )
+        runtime_name = (
             self.session_manager.get_session_runtime(channel_id, session_id)
             or self.config.default_runtime
         )
-        self.session_manager.create_session(
-            channel_id, session_id, resolved_name
-        )
-        runtime = self.runtime_manager.get_runtime(resolved_name)
-        assert runtime is not None, f"runtime '{resolved_name}' is not enabled"
+        runtime = self.runtime_manager.get_runtime(runtime_name)
+        assert runtime is not None, f"runtime '{runtime_name}' is not enabled"
 
-        # 3. assemble history BEFORE appending the current turn so it is
-        #    excluded from history_message.
+        # 3. assemble history BEFORE appending the current turn.
         history_message = self.session_manager.assembly_history_messages(
             channel_id, session_id
         )
@@ -197,7 +201,10 @@ class Gateway:
             history_message=history_message,
             message=user_message,
         )
-        logger.info(f"invoking runtime: {runtime.name}")
+        logger.info(
+            f"invoking runtime: {runtime.name} "
+            f"(conv={conversation_id} session={session_id})"
+        )
 
         # 6. drive runtime, yield each item, accumulate assistant text
         text_parts: list[str] = []
@@ -216,20 +223,26 @@ class Gateway:
     async def invoke(
         self,
         channel_id: str,
-        session_id: str,
+        conversation_id: str,
         user_message: Message,
     ) -> ChatCompletion:
         """Non-streaming convenience wrapper around invoke_stream — collects
         assistant text from yielded items into a single ChatCompletion."""
         text_parts: list[str] = []
         # The ChatCompletion.model label mirrors what invoke_stream picks:
-        # session meta > config.default_runtime.
+        # session meta on the conversation's current session, falling back
+        # to config.default_runtime.
+        current_session = self.session_manager.resolve_current_session(
+            channel_id, conversation_id, self.config.default_runtime
+        )
         model_name = (
-            self.session_manager.get_session_runtime(channel_id, session_id)
+            self.session_manager.get_session_runtime(
+                channel_id, current_session
+            )
             or self.config.default_runtime
         )
         async for item in self.invoke_stream(
-            channel_id, session_id, user_message
+            channel_id, conversation_id, user_message
         ):
             if isinstance(item, Message) and item.role == "assistant":
                 for c in item.content:

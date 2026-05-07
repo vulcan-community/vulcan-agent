@@ -81,10 +81,10 @@ class FeishuChannel(BaseChannel):
         assert message.message_id is not None
         assert message.content is not None
 
-        session_id = message.chat_id
+        conversation_id = message.chat_id
         message_id = message.message_id
         text = json.loads(message.content)["text"]
-        logger.info(f"feishu recv: chat={session_id} msg_len={len(text)}")
+        logger.info(f"feishu recv: chat={conversation_id} msg_len={len(text)}")
 
         # 1. acknowledge with reaction
         send_reaction(self.client, message_id)
@@ -102,7 +102,7 @@ class FeishuChannel(BaseChannel):
         session = CardSession(self.client, message_id)
         await session.start()
         try:
-            async for item in self.invoke_stream(session_id, user_message):
+            async for item in self.invoke_stream(conversation_id, user_message):
                 if isinstance(item, Message) and item.role == "assistant":
                     for c in item.content:
                         chunk = getattr(c, "text", "")
@@ -132,4 +132,4 @@ class FeishuChannel(BaseChannel):
         finally:
             await session.finish()
 
-        logger.info(f"feishu reply done: chat={session_id}")
+        logger.info(f"feishu reply done: chat={conversation_id}")

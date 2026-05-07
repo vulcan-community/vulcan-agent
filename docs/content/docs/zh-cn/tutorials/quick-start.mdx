@@ -86,7 +86,7 @@ Gateway 监听 `http://0.0.0.0:4000`，讲的是 OpenAI Chat Completions API。
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: default" \
+  -H "X-Conversation-Id: default" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "你好，你是谁？"}]
@@ -95,10 +95,10 @@ curl http://localhost:4000/v1/chat/completions \
 
 会拿到一个标准 `ChatCompletion` JSON，回复在 `choices[0].message.content`。两点要注意：
 
-- `X-Session-Id: default` —— 随便什么字符串，只要下次复用就行。流水落在 `~/.vulcan/sessions/gateway/default.jsonl`。
+- `X-Conversation-Id: default` —— 随便什么字符串，只要下次复用就行。Vulcan 会在它底下分配一段 session（12 位十六进制随机 id），流水落在 `~/.vulcan/sessions/gateway/<session_id>.jsonl`。指针 `~/.vulcan/sessions/gateway/_conversations/default.json` 记着这个 conversation 当前挂在哪段 session 上 —— `/new` 只是把这个指针换到一段新 session，你传的 id 不变。
 - `"model": "claude-code"` —— 这是 runtime 名字，不是模型名。模型名在 `claude-code` *里面*，配置里写了。
 
-下一轮继续用同一个 session id，assistant 就能看到上一轮。
+下一轮继续用同一个 conversation id，assistant 就能看到上一轮。
 
 ## 6. 看 session
 
@@ -107,14 +107,14 @@ Vulcan 把 slash command 当成一条合成的 user 消息，发法和普通消�
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: default" \
+  -H "X-Conversation-Id: default" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "/sessions"}]
   }'
 ```
 
-会列出 Vulcan 知道的所有 session。`/session default` 显示当前 session 的流水。`/help` 列全部 command。
+会列出当前 conversation 下的所有 session，每段一行，当前这段用 `*` 标出来。`/status` 显示解析到的 session id。`/session <session_id>` 打印指定 session 的流水。`/help` 列全部 command。
 
 ## 7. 关键一招 —— 对话中途切 agent runtime
 
@@ -145,21 +145,21 @@ curl http://localhost:4000/v1/chat/completions \
 }
 ```
 
-重新 `uv run python run.py`，然后在同一个 `default` session 上发：
+重新 `uv run python run.py`，然后在同一个 `default` conversation 上发：
 
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: default" \
+  -H "X-Conversation-Id: default" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "/switch base-openai"}]
   }'
 ```
 
-从下一轮开始，同一段对话跑在 `base-openai` 上 —— 纯 Chat Completions、工具面不同、推理回路也不同。JSONL 流水还是那一份，继续往下长。想切回去就 `/switch claude-code`。
+从下一轮开始，同一段 conversation 当前 session 跑在 `base-openai` 上 —— 纯 Chat Completions、工具面不同、推理回路也不同。JSONL 流水还是那一份，继续往下长。想切回去就 `/switch claude-code`。想在保持 conversation id 不变的前提下清个场，发 `/new`：轮换到一段全新的 session，运行时绑定从上段 session 沿用过来。
 
-这就是 Vulcan 最不一样的地方：不是换模型，而是换整个 agent runtime，在同一个 session 上。
+这就是 Vulcan 最不一样的地方：不是换模型，而是换整个 agent runtime，在同一段 conversation 上。
 
 ## 接下来
 

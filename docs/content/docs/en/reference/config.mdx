@@ -18,19 +18,34 @@ All pydantic models in this schema have `extra="forbid"` — unknown keys cause 
 
 ## Per-session runtime binding
 
-Runtime selection is **per-session**, not global or per-channel. Each session's binding lives in a sidecar `<session_id>.meta.json` next to the JSONL transcript:
+Runtime selection is **per-session**, not global or per-channel — and sessions rotate under a stable conversation pointer, so the binding effectively lives one layer below the user-facing address.
 
-```json
-{"runtime_name": "claude-code"}
+File layout:
+
+```
+~/.vulcan/sessions/
+├── <channel_id>/
+│   ├── _conversations/
+│   │   └── <conversation_id>.json     # {"current_session_id": "..."}
+│   ├── <session_id>.jsonl             # transcript
+│   └── <session_id>.meta.json         # {"runtime_name": "...", "conversation_id": "..."}
 ```
 
-Three things write this file:
+Each session's `.meta.json` sidecar carries both its runtime binding and a back-pointer to the owning conversation:
 
-- `/switch <name>` — explicit rebind from the current session.
-- The API middleware — when a request's `"model"` field is non-empty, it's persisted before the gateway dispatches.
-- `Gateway.invoke_stream` — on a fresh session with no prior binding, it writes `config.default_runtime`.
+```json
+{"runtime_name": "claude-code", "conversation_id": "default"}
+```
 
-`Session.runtime_name` (pydantic) carries the binding in-memory; it is `None` if the meta file is missing.
+The `<channel_id>/_conversations/<conversation_id>.json` pointer tracks which session the conversation is currently attached to. `/new` allocates a fresh session and rotates the pointer (inheriting the previous session's `runtime_name`); `/resume <session_id>` moves the pointer to an existing session in the same conversation. Neither of those touches the runtime binding on the sidecar.
+
+Three things write the runtime binding:
+
+- `/switch <name>` — explicit rebind on the conversation's current session.
+- The API middleware — when a request's `"model"` field is non-empty, it's persisted to the conversation's current session before the gateway dispatches.
+- `Gateway.invoke_stream` / `LocalSessionManager.resolve_current_session` — when a conversation has no pointer yet (first touch), a fresh session is allocated bound to `config.default_runtime` and the pointer is installed.
+
+`Session.runtime_name` (pydantic) carries the binding in-memory; it is `None` if the meta file is missing. See [Sessions & conversations](./sessions) for the full storage contract.
 
 ## `RuntimeConfig`
 

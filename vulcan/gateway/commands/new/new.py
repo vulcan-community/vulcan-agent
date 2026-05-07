@@ -13,27 +13,30 @@ class NewCommand(BaseCommand):
         super().__init__(
             command="new",
             description=(
-                "Clear the current session (deletes its .jsonl and"
-                " .meta.json). Next message starts fresh: /new"
+                "Start a fresh session on this conversation. Allocates a"
+                " new session id and points the conversation at it;"
+                " inherits the runtime from the previous session: /new"
             ),
         )
         self._gateway = gateway
 
     def exec(
-        self, args: list[str], channel_id: str, session_id: str
+        self, args: list[str], channel_id: str, conversation_id: str
     ) -> ChatCompletion:
-        del args  # Unused.
+        del args
         try:
-            self._gateway.session_manager.delete_session(channel_id, session_id)
-        except FileNotFoundError:
-            return self._reply(
-                f"No session to clear for {channel_id}/{session_id}."
+            new_session = self._gateway.session_manager.rotate_current_session(
+                channel_id,
+                conversation_id,
+                self._gateway.config.default_runtime,
             )
         except Exception as e:
             return self._reply(
-                f"Failed to clear session: {type(e).__name__}: {e}"
+                f"Failed to start new session: {type(e).__name__}: {e}"
             )
+        runtime = self._gateway.session_manager.get_session_runtime(
+            channel_id, new_session
+        )
         return self._reply(
-            f"Cleared session {channel_id}/{session_id}."
-            " Next message starts fresh."
+            f"Started new session {new_session} (runtime: {runtime})."
         )

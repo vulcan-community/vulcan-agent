@@ -1,0 +1,59 @@
+---
+title: Session 与 conversation
+description: 两层身份模型 —— 稳定的 conversation 指针挂在可轮换的 JSONL transcript 之上。
+---
+
+Vulcan 把 **conversation**（稳定的外部地址）和 **session**（具体的 transcript）拆开。拆完之后：`/new` 能起一份全新的 transcript 而不丢调用方的身份；`/resume` 能回到更旧的 transcript；运行时绑定则留在它归属的那段 session 上。
+
+## Conversation 与 session
+
+**conversation** 是跨 `/new` 保持不变的用户侧地址：
+
+- 飞书 —— chat 的 `chat_id`。
+- HTTP —— 请求 header `X-Conversation-Id`（不传时默认 `"default"`）。
+
+**session** 是一份具体的 transcript —— 一对文件（`<session_id>.jsonl` + `<session_id>.meta.json`），id 由 12 位十六进制字符随机生成。`/new` 就是把 conversation 指针换到一段新 session；`/resume` 就是把指针改到一段已有的 session。旧 session 原样留在盘上。
+
+## 文件布局
+
+```
+~/.vulcan/sessions/
+├── <channel_id>/
+│   ├── _conversations/
+│   │   └── <conversation_id>.json     # {"current_session_id": "..."}
+│   ├── <session_id>.jsonl             # transcript，每行一个 SessionItem
+│   └── <session_id>.meta.json         # {"runtime_name": "...", "conversation_id": "..."}
+```
+
+`<channel_id>` 就是传输名 —— HTTP API 是 `gateway`，飞书是 `feishu`……conversation 和 session 都不跨 channel；两个 channel 下同名 id 是两对独立的文件。
+
+## Session id 格式
+
+由 `uuid.uuid4().hex[:12]` 生成 —— 48 位随机数编成 12 位小写十六进制（例：`9f2a1c4b6e0d`）。对单用户部署来说碰撞可以忽略，长度又短到能塞进一条 CLI 消息里。
+
+## 指针文件 —— `_conversations/<conversation_id>.json`
+
+就一个字段：
+
+| 字段                 | 类型   | 说明                                                           |
+| -------------------- | ------ | -------------------------------------------------------------- |
+| `current_session_id` | `str`  | conversation 当前挂的 session id。                             |
+
+只有 `resolve_current_session`（首次接触时的安装）、`rotate_current_session`（`/new`）、`set_current_session_id`（`/resume`）三处会写它。文件的 mtime 被 `/conversations` 用来按最新在前排序。
+
+## Session meta —— `<session_id>.meta.json`
+
+| 字段              | 类型   | 说明                                                                                                     |
+| ----------------- | ------ | -------------------------------------------------------------------------------------------------------- |
+| `runtime_name`    | `str`  | 该 session 绑定到的运行时。`/switch`、API `"model"`、首次接触这三处写它。                                |
+| `conversation_id` | `str`  | 回指所属 conversation 的反向指针。`create_session` 时写一次，之后不改。                                  |
+
+这个 `conversation_id` 回指让 `/sessions` 和 `/conversations` 不用扫所有指针文件就能列出正确的行：它们 glob `*.meta.json` 再过滤。
+
+## 各命令怎么动存储
+
+- **`/new`** —— 分配一段新 session，写它的 `.jsonl` + `.meta.json`（沿用的 `runtime_name`），然后覆写 `_conversations/<conversation_id>.json` 指针。
+- **`/resume <session_id>`** —— 校验目标 session 的 `meta.conversation_id` 回指和调用方一致，然后只覆写 `_conversations/<conversation_id>.json` 指针。
+- **`/switch <name>`** —— 通过 conversation 指针解析出当前 session id，只改写那段 session 的 `.meta.json`（`runtime_name` 字段）。
+
+三件事刻意分在三个文件里：transcript（`.jsonl`）只 append；运行时绑定（`.meta.json`）在 `/switch` 时重绑、`/new` 时继承；conversation 指针（`_conversations/...`）在 `/new` / `/resume` 时轮换。每个命令只动它必须动的那部分。

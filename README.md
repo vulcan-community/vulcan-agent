@@ -16,12 +16,13 @@ See [docs/content/docs/en/index.mdx](docs/content/docs/en/index.mdx) for the ful
 clients (OpenAI HTTP / Feishu / Slack / ...)
         │
         ▼
-┌─── inbound adapters ────┐    ┌─── control plane ─────┐
-│ api_server middleware   │    │ commands              │
-│   → invoke()            │    │  /help /version       │
-│ channels (Feishu, ...)  │    │  /switch /runtime     │
-│   → invoke_stream()     │    │  /sessions /session   │
-└───────────┬─────────────┘    └──────────┬────────────┘
+┌─── inbound adapters ────┐    ┌──── control plane ─────┐
+│ api_server middleware   │    │ commands               │
+│   → invoke()            │    │  /help /version /status│
+│ channels (Feishu, ...)  │    │  /new /resume /switch  │
+│   → invoke_stream()     │    │  /runtime /sessions    │
+│                         │    │  /conversations /sess… │
+└───────────┬─────────────┘    └──────────┬─────────────┘
             │                             │
             └────────────► gateway ◄──────┘
                               │
@@ -34,10 +35,11 @@ The gateway exposes two entry points. The API server calls `gateway.invoke()` an
 
 ## Concepts
 
-- **Gateway** — the orchestrator. `invoke()` returns a `ChatCompletion`, `invoke_stream()` yields `SessionItem`s; the first wraps the second.
+- **Gateway** — the orchestrator. `invoke(channel_id, conversation_id, user_message)` returns a `ChatCompletion`, `invoke_stream(...)` yields `SessionItem`s; the first wraps the second.
 - **Runtime** — an agent stack behind a small interface: `BaseRuntime.invoke(ctx) -> AsyncIterator[SessionItem]` and `is_installed() -> bool`. Every call is stateless — the gateway pre-builds a `(history_message, current_message)` pair and hands it over; the runtime's own session is fresh each turn.
-- **Session** — a JSONL transcript at `~/.vulcan/sessions/<channel_id>/<session_id>.jsonl`. Each line is an OpenAI `ConversationItem`. Sessions are isolated per source: API requests use `channel_id="gateway"`, channels use the channel's name.
-- **Channel** — a transport adapter. `BaseChannel.invoke(session_id, user_message)` forwards to the gateway with `channel_id = self.name`. Feishu today; Slack, Discord planned.
+- **Conversation** — the stable user-facing address (Feishu `chat_id`, HTTP `X-Conversation-Id` header). Persists across `/new`. Tracked by a pointer file at `~/.vulcan/sessions/<channel_id>/_conversations/<conversation_id>.json` that names the conversation's current session.
+- **Session** — a concrete JSONL transcript at `~/.vulcan/sessions/<channel_id>/<session_id>.jsonl`, keyed by a random 12-hex-char id, with a `<session_id>.meta.json` sidecar carrying `{runtime_name, conversation_id}`. `/new` rotates the conversation's pointer to a fresh session; `/resume <session_id>` moves it to an existing one.
+- **Channel** — a transport adapter. `BaseChannel.invoke(conversation_id, user_message)` forwards to the gateway with `channel_id = self.name`. Feishu today; Slack, Discord planned.
 - **Command** — a control-plane slash command. Short-circuits the runtime call and returns a synthetic `vulcan-system` completion.
 - **Persona** — three template files (`IDENTITY.md`, `SOUL.md`, `TOOL.md`) copied to `~/.vulcan/agent/` on first start. Each runtime decides where to inject the rendered persona (system-prompt append for Claude Code, prompt prepend for Codex, system role for base OpenAI).
 
@@ -74,7 +76,7 @@ The server listens on `http://0.0.0.0:4000`. Talk to it like any OpenAI endpoint
 ```bash
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Session-Id: default" \
+  -H "X-Conversation-Id: default" \
   -d '{
     "model": "claude-code",
     "messages": [{"role": "user", "content": "hello"}]
@@ -107,7 +109,7 @@ Runtimes and channels are declared in `~/.vulcan/vulcan.json` (validated by `Gat
 }
 ```
 
-`default_runtime` is the fallback for sessions with no prior binding. Runtime selection is per-session: `/switch <name>` from any chat rebinds that session's `.meta.json` sidecar, and the API's `"model"` field behaves the same way. Channels do not pick a runtime. The `name` field accepts the alias `"model"` in JSON. Empty `base_url` / `api_key` fall back to the SDK default and the local credential chain (for `claude-code` that means your existing `claude` CLI login; for `codex` it means `~/.codex/auth.json`). See [`config` reference](docs/content/docs/en/reference/config.mdx) for the full schema.
+`default_runtime` is the fallback for brand-new conversations whose first session has no prior binding. Runtime selection is per-session: `/switch <name>` from any chat rebinds that session's `.meta.json` sidecar, and the API's `"model"` field (resolved against the conversation's current session) behaves the same way. Channels do not pick a runtime. The `name` field accepts the alias `"model"` in JSON. Empty `base_url` / `api_key` fall back to the SDK default and the local credential chain (for `claude-code` that means your existing `claude` CLI login; for `codex` it means `~/.codex/auth.json`). See [`config` reference](docs/content/docs/en/reference/config.mdx) for the full schema.
 
 ## Project layout
 

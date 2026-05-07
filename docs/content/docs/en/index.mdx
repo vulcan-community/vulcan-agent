@@ -3,7 +3,7 @@ title: Introduction
 description: Vulcan is the dispatch layer for pluggable agent runtimes — one session, one API, many agent stacks.
 ---
 
-Vulcan is the dispatch layer for **pluggable agent runtimes**. An "agent runtime" here is a full orchestration stack, not just an LLM — it's the model plus its tool surface, its sandbox, its reasoning loop. Claude Code reads files, edits code, runs shell, speaks MCP. OpenAI Codex does the same class of work. Google ADK brings its own orchestrator. Base OpenAI is plain Chat Completions — no built-in tools. Vulcan puts all of them behind one OpenAI-compatible API, keeps one JSONL transcript per session, and exposes one slash-command control plane. The same conversation can hop between runtimes mid-stream via `/switch`.
+Vulcan is the dispatch layer for **pluggable agent runtimes**. An "agent runtime" here is a full orchestration stack, not just an LLM — it's the model plus its tool surface, its sandbox, its reasoning loop. Claude Code reads files, edits code, runs shell, speaks MCP. OpenAI Codex does the same class of work. Google ADK brings its own orchestrator. Base OpenAI is plain Chat Completions — no built-in tools. Vulcan puts all of them behind one OpenAI-compatible API, keeps one JSONL transcript per session, and exposes one slash-command control plane. Each conversation keeps a transcript, `/new` starts a fresh one, and the same conversation can hop between runtimes mid-stream via `/switch`.
 
 ## What Vulcan is not
 
