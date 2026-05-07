@@ -71,7 +71,6 @@ class Gateway:
         logger.info("gateway ready")
 
     def _register_runtimes(self):
-
         from ..runtime import get_runtime_cls
 
         for runtime_name, runtime_config in self.config.runtimes.items():
@@ -79,7 +78,14 @@ class Gateway:
                 logger.info(f"runtime disabled, skip: {runtime_name}")
                 continue
 
-            runtime_cls = get_runtime_cls(runtime_name)
+            try:
+                runtime_cls = get_runtime_cls(runtime_name)
+            except ImportError as e:
+                logger.warning(
+                    f"runtime not installed, skip: {runtime_name} ({e})"
+                )
+                continue
+
             runtime_instance = runtime_cls(
                 name=runtime_name,
                 agent_config=AgentConfig(
@@ -97,24 +103,57 @@ class Gateway:
             )
 
     def _register_commands(self) -> None:
-        from .commands.runtimes.runtimes import RuntimesCommand
+        from .commands.help.help import HelpCommand
+        from .commands.runtime.runtime import RuntimeCommand
         from .commands.session.session import SessionCommand
         from .commands.sessions.sessions import SessionsCommand
         from .commands.switch.switch import SwitchCommand
+        from .commands.version.version import VersionCommand
 
         for cls in (
             SwitchCommand,
             SessionsCommand,
             SessionCommand,
-            RuntimesCommand,
+            RuntimeCommand,
+            VersionCommand,
+            HelpCommand,
         ):
             cmd = cls(gateway=self)
             self.command_manager.register_command(cmd)
             logger.info(f"registered command: /{cmd.command}")
 
+    def _register_channels(self) -> None:
+        from ..gateway.channels import get_channel_cls
+
+        for channel_name, channel_config in self.config.channels.items():
+            if not channel_config.enable:
+                logger.debug(f"channel disabled, skip: {channel_name}")
+                continue
+
+            channel_cls = get_channel_cls(channel_name)
+            default_runtime = self.runtime_manager.get_runtime(
+                channel_config.runtime
+            )
+            if not default_runtime:
+                logger.error(
+                    f"{channel_name}'s runtime {channel_config.runtime} not exist, skip init this channel"
+                )
+                continue
+            channel_instance = channel_cls(
+                name=channel_name,
+                gateway=self,
+                default_runtime=default_runtime,
+                config=channel_config.config,
+            )
+            setattr(self, f"{channel_name}_channel", channel_instance)
+            logger.info(
+                f"registered channel: {channel_name} "
+                f"-> runtime={channel_config.runtime}"
+            )
+
     async def invoke_stream(
         self,
-        user_id: str,
+        channel_id: str,
         session_id: str,
         user_message: Message,
         runtime_name: str | None = None,
@@ -150,27 +189,34 @@ class Gateway:
             )
             return
 
-        # 2. save user message to session
-        self.session_manager.append_to_session(
-            user_id, session_id, user_message
+        # 2. assemble history BEFORE appending the current turn so it is
+        #    excluded from history_message.
+        history_message = self.session_manager.assembly_history_messages(
+            channel_id, session_id
         )
 
-        # 3. pick runtime
+        # 3. save current user message to session
+        self.session_manager.append_to_session(
+            channel_id, session_id, user_message
+        )
+
+        # 4. pick runtime
         if runtime_name is not None:
             runtime = self.runtime_manager.get_runtime(runtime_name)
         else:
             runtime = self.runtime_manager.curr_runtime
         assert runtime is not None
 
-        # 4. build invocation context
+        # 5. build invocation context — runtime sees two messages: a
+        #    pre-rendered history + the current user input.
         ctx = InvocationContext(
-            user_id=user_id,
-            session=self.session_manager.get_session(user_id, session_id),
-            message={"role": "user", "content": message_text},
+            channel_id=channel_id,
+            history_message=history_message,
+            message=user_message,
         )
         logger.info(f"invoking runtime: {runtime.name}")
 
-        # 5. drive runtime, yield each item, accumulate assistant text
+        # 6. drive runtime, yield each item, accumulate assistant text
         text_parts: list[str] = []
         async for item in runtime.invoke(ctx):
             if isinstance(item, Message) and item.role == "assistant":
@@ -178,7 +224,7 @@ class Gateway:
                     text_parts.append(getattr(c, "text", ""))
             yield item
 
-        # 6. persist aggregated assistant message
+        # 7. persist aggregated assistant message
         final_text = "".join(text_parts)
         assistant_item = Message(
             id=str(uuid.uuid4()),
@@ -194,13 +240,13 @@ class Gateway:
             ],
         )
         self.session_manager.append_to_session(
-            user_id, session_id, assistant_item
+            channel_id, session_id, assistant_item
         )
         logger.info(f"runtime done: {runtime.name} reply_len={len(final_text)}")
 
     async def invoke(
         self,
-        user_id: str,
+        channel_id: str,
         session_id: str,
         user_message: Message,
         runtime_name: str | None = None,
@@ -214,7 +260,7 @@ class Gateway:
             else "vulcan-system"
         )
         async for item in self.invoke_stream(
-            user_id, session_id, user_message, runtime_name
+            channel_id, session_id, user_message, runtime_name
         ):
             if isinstance(item, Message) and item.role == "assistant":
                 for c in item.content:
@@ -236,35 +282,6 @@ class Gateway:
                 )
             ],
         )
-
-    def _register_channels(self) -> None:
-        from ..gateway.channels import get_channel_cls
-
-        for channel_name, channel_config in self.config.channels.items():
-            if not channel_config.enable:
-                logger.debug(f"channel disabled, skip: {channel_name}")
-                continue
-
-            channel_cls = get_channel_cls(channel_name)
-            default_runtime = self.runtime_manager.get_runtime(
-                channel_config.runtime
-            )
-            if not default_runtime:
-                logger.error(
-                    f"{channel_name}'s runtime {channel_config.runtime} not exist, skip init this channel"
-                )
-                continue
-            channel_instance = channel_cls(
-                name=channel_name,
-                gateway=self,
-                default_runtime=default_runtime,
-                config=channel_config.config,
-            )
-            setattr(self, f"{channel_name}_channel", channel_instance)
-            logger.info(
-                f"registered channel: {channel_name} "
-                f"-> runtime={channel_config.runtime}"
-            )
 
     def start(self) -> None:
         logger.info("starting gateway on http://0.0.0.0:4000")

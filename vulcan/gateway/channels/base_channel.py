@@ -31,20 +31,18 @@ class BaseChannel(ABC):
     @final
     async def invoke(
         self,
-        user_id: str,
         session_id: str,
         user_message: Message,
     ) -> ChatCompletion:
-        return await self.gateway.invoke(user_id, session_id, user_message)
+        return await self.gateway.invoke(self.name, session_id, user_message)
 
     @final
     async def invoke_stream(
         self,
-        user_id: str,
         session_id: str,
         user_message: Message,
     ) -> AsyncIterator[SessionItem]:
         async for item in self.gateway.invoke_stream(
-            user_id, session_id, user_message
+            self.name, session_id, user_message
         ):
             yield item

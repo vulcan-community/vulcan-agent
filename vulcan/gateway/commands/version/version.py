@@ -6,30 +6,22 @@ from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
+from ....version import VERSION
 from ..base_command import BaseCommand
 
 if TYPE_CHECKING:
     from ...gateway import Gateway
 
 
-class RuntimesCommand(BaseCommand):
+class VersionCommand(BaseCommand):
     def __init__(self, gateway: "Gateway") -> None:
         super().__init__(
-            command="runtimes",
-            description="List registered runtimes: /runtimes",
+            command="version",
+            description="Show the installed vulcan-agent version: /version",
         )
         self._gateway = gateway
 
     def exec(self, args: list[str]) -> ChatCompletion:
-        mgr = self._gateway.runtime_manager
-
-        rows: list[str] = []
-        for rt in mgr.list_runtimes():
-            mark = "*" if rt is mgr.curr_runtime else " "
-            suffix = f" — {rt.description}" if rt.description else ""
-            rows.append(f"  [{mark}] {rt.name}{suffix}")
-        text = "Runtimes:\n" + ("\n".join(rows) if rows else "  (none)")
-
         return ChatCompletion(
             id=str(uuid.uuid4()),
             object="chat.completion",
@@ -41,7 +33,7 @@ class RuntimesCommand(BaseCommand):
                     finish_reason="stop",
                     message=ChatCompletionMessage(
                         role="assistant",
-                        content=text,
+                        content=f"vulcan-agent {VERSION}",
                     ),
                 )
             ],

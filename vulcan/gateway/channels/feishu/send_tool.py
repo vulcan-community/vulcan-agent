@@ -71,7 +71,6 @@ async def send_tool_result(
     body_id, args = state
     marker = "✗" if is_error else "✓"
     body_md = (
-        f"**args**\n```\n{args}\n```\n\n"
-        f"**result** {marker}\n```\n{output}\n```"
+        f"**args**\n```\n{args}\n```\n\n**result** {marker}\n```\n{output}\n```"
     )
     await session.set_content(body_id, body_md)

@@ -27,10 +27,6 @@ from ....utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Anchor element baked into the initial card schema; new elements are
-# inserted after the last-added element id, starting from this anchor.
-ANCHOR_ELEMENT_ID = "anchor"
-
 
 def initial_card_schema() -> dict:
     return {
@@ -44,30 +40,19 @@ def initial_card_schema() -> dict:
                 "print_strategy": "fast",
             },
         },
-        "body": {
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "element_id": ANCHOR_ELEMENT_ID,
-                    "content": "",
-                }
-            ]
-        },
+        "body": {"elements": []},
     }
 
 
 class CardSession:
     """Live card state shared by all send_* helpers in this package."""
 
-    def __init__(
-        self, client: lark.Client, reply_to_message_id: str
-    ) -> None:
+    def __init__(self, client: lark.Client, reply_to_message_id: str) -> None:
         self.client = client
         self.reply_to_message_id = reply_to_message_id
         self.card_id: str | None = None
         self.sequence: int = 1
         self.element_counter: int = 0
-        self.last_element_id: str = ANCHOR_ELEMENT_ID
         # Most recently opened markdown element for streaming text. Cleared
         # whenever a non-text event lands so the next text chunk starts a
         # fresh element rather than appending to a stale one.
@@ -86,9 +71,7 @@ class CardSession:
             .request_body(
                 CreateCardRequestBody.builder()
                 .type("card_json")
-                .data(
-                    json.dumps(initial_card_schema(), ensure_ascii=False)
-                )
+                .data(json.dumps(initial_card_schema(), ensure_ascii=False))
                 .build()
             )
             .build()
@@ -151,7 +134,7 @@ class CardSession:
         return f"{prefix}_{self.element_counter}"
 
     async def insert_element(self, element: dict) -> None:
-        """Insert a new element after the most recently added one."""
+        """Append a new element to the end of the card body."""
         assert self.client.cardkit is not None
         assert self.card_id is not None
 
@@ -161,8 +144,7 @@ class CardSession:
             .card_id(self.card_id)
             .request_body(
                 CreateCardElementRequestBody.builder()
-                .type("insert_after")
-                .target_element_id(self.last_element_id)
+                .type("append")
                 .uuid(f"{self.card_id}-ins-{seq}")
                 .sequence(seq)
                 .elements(json.dumps([element], ensure_ascii=False))
@@ -171,8 +153,6 @@ class CardSession:
             .build()
         )
         await self.client.cardkit.v1.card_element.acreate(req)
-        # advance the anchor so next insert lands AFTER this element
-        self.last_element_id = element["element_id"]
 
     async def set_content(self, element_id: str, content: str) -> None:
         """Replace the markdown content of an existing element."""

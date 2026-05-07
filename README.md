@@ -14,10 +14,10 @@ clients (OpenAI HTTP / Feishu / Slack / ...)
         ▼
 ┌─── inbound adapters ────┐    ┌─── control plane ─────┐
 │ api_server middleware   │    │ commands              │
-│   → invoke()            │    │  /switch /sessions    │
-│ channels (Feishu, ...)  │    │  /session /runtimes   │
-│   → invoke_stream()     │    └──────────┬────────────┘
-└───────────┬─────────────┘               │
+│   → invoke()            │    │  /help /switch        │
+│ channels (Feishu, ...)  │    │  /sessions /session   │
+│   → invoke_stream()     │    │  /runtime             │
+└───────────┬─────────────┘    └──────────┬────────────┘
             │                             │
             └────────────► gateway ◄──────┘
                               │
@@ -32,7 +32,7 @@ The gateway exposes two entry points. The API server calls `gateway.invoke()` an
 
 - **Gateway** — the orchestrator. Two entry points: `invoke()` returns a `ChatCompletion`, `invoke_stream()` yields `SessionItem`s. The first is a wrapper that consumes the second.
 - **Runtime** — a pluggable agent backend implementing `BaseRuntime.invoke(ctx) -> AsyncIterator[SessionItem]`. Each runtime decides how to translate the transcript into its native input.
-- **Session** — a JSONL transcript at `~/.vulcan/sessions/<user_id>/<session_id>.jsonl`. Each line is an OpenAI `ConversationItem`. Sessions are isolated per source: API requests use `user_id="gateway"`, channels use the channel's name.
+- **Session** — a JSONL transcript at `~/.vulcan/sessions/<channel_id>/<session_id>.jsonl`. Each line is an OpenAI `ConversationItem`. Sessions are isolated per source: API requests use `channel_id="gateway"`, channels use the channel's name.
 - **Channel** — a transport adapter. `BaseChannel.invoke()` and `invoke_stream()` forward to the gateway. Feishu today; Slack, Discord planned.
 - **Command** — a control-plane slash command. Short-circuits the runtime call and returns a synthetic completion.
 - **Persona** — three template files (`IDENTITY.md`, `SOUL.md`, `TOOL.md`) copied to `~/.vulcan/agent/` on first start. The gateway feeds them into `AgentConfig.instruction`; each runtime decides how to inject.
@@ -115,7 +115,7 @@ Runtimes and channels are declared in `~/.vulcan/vulcan.json` (validated by `Gat
 ```text
 vulcan/
 ├── api_server/       OpenAI-compatible HTTP layer (calls gateway.invoke)
-├── consts.py         GATEWAY_USER_ID and other constants
+├── consts.py         GATEWAY_CHANNEL_ID and other constants
 ├── gateway/          Gateway.invoke + invoke_stream orchestrator
 │   ├── channels/     BaseChannel + concrete channels (Feishu, ...)
 │   └── commands/     BaseCommand + slash commands

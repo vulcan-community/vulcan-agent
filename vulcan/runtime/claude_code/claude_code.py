@@ -22,6 +22,8 @@ from openai.types.responses.response_function_tool_call_output_item import (
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_reasoning_item import (
     Content as ReasoningContent,
+)
+from openai.types.responses.response_reasoning_item import (
     ResponseReasoningItem,
 )
 
@@ -34,9 +36,8 @@ class ClaudeCodeRuntime(BaseRuntime):
     async def invoke(
         self, ctx: InvocationContext
     ) -> AsyncIterator[SessionItem]:
-        items = ctx.session.items
-        history = self._render_history(items[:-1])
-        new_msg = self._text(items[-1])
+        history_text = self._message_text(ctx.history_message)
+        current_text = self._message_text(ctx.message)
 
         model_cfg = self.agent_config.model
         env: dict[str, str] = {}
@@ -57,11 +58,19 @@ class ClaudeCodeRuntime(BaseRuntime):
             system_prompt={
                 "type": "preset",
                 "preset": "claude_code",
-                "append": self._persona_prompt(history),
+                "append": self._persona_prompt(),
             },
         )
         async with ClaudeSDKClient(options=options) as client:
-            await client.query(new_msg)
+            # The SDK's `query` takes a single user-message string. Prepend
+            # the gateway-prepared history (if any) so the model sees prior
+            # context before the current turn.
+            query = (
+                f"{history_text}\n\n{current_text}"
+                if history_text
+                else current_text
+            )
+            await client.query(query)
             async for msg in client.receive_response():
                 # AssistantMessage holds the model's blocks: text, thinking,
                 # and tool-use calls.
@@ -100,9 +109,7 @@ class ClaudeCodeRuntime(BaseRuntime):
                 type="reasoning",
                 summary=[],
                 content=[
-                    ReasoningContent(
-                        type="reasoning_text", text=block.thinking
-                    )
+                    ReasoningContent(type="reasoning_text", text=block.thinking)
                 ],
             )
         if isinstance(block, ToolUseBlock):
@@ -129,25 +136,12 @@ class ClaudeCodeRuntime(BaseRuntime):
             )
         return None
 
-    def _persona_prompt(self, history: str) -> str:
-        """Compose Vulcan's persona (identity + soul + tool guidance) and
-        append the prior conversation, to be injected after Claude Code's
-        default system prompt."""
+    def _persona_prompt(self) -> str:
+        """Compose Vulcan's persona (identity + soul + tool guidance), to be
+        injected after Claude Code's default system prompt."""
         i = self.agent_config.instruction
-        sections = [i.identity, i.soul, i.tool]
-        if history:
-            sections.append(f"# Prior conversation\n\n{history}")
-        return "\n\n".join(s for s in sections if s.strip())
+        return "\n\n".join(s for s in (i.identity, i.soul, i.tool) if s.strip())
 
     @staticmethod
-    def _text(item: SessionItem) -> str:
-        if isinstance(item, Message):
-            return "".join(getattr(c, "text", "") for c in item.content)
-        return ""
-
-    def _render_history(self, items: list[SessionItem]) -> str:
-        return "\n".join(
-            f"{i.role}: {self._text(i)}"
-            for i in items
-            if isinstance(i, Message)
-        )
+    def _message_text(msg: Message) -> str:
+        return "".join(getattr(c, "text", "") for c in msg.content)

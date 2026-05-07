@@ -9,12 +9,14 @@ From any chat, you can type a slash command to inspect or change Vulcan's state 
 
 | Command                       | What it does                                                          |
 | ----------------------------- | --------------------------------------------------------------------- |
+| `/help`                       | List every available slash command.                                  |
+| `/version`                    | Show the installed vulcan-agent version.                             |
 | `/switch <runtime>`           | Switch which model brain is replying from now on.                    |
-| `/runtimes`                   | See what models are available — the current one is marked with `*`.  |
+| `/runtime`                    | See what models are available — the current one is marked with `*`.  |
 | `/sessions`                   | See all your past conversations, sorted by recency.                  |
 | `/session <name>`             | Look at a past conversation's raw history.                           |
 
-`/session` accepts either a full `<user>/<session_id>` path (just copy from `/sessions` output) or just the session ID if it's the only one with that name.
+`/session` accepts either a full `<channel>/<session_id>` path (just copy from `/sessions` output) or just the session ID if it's the only one with that name.
 
 ## Switching models mid-chat
 

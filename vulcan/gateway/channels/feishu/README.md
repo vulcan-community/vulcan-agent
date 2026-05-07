@@ -41,7 +41,7 @@ Construction wires the lark `EventDispatcherHandler`, then spawns a daemon threa
 
 1. `send_reaction` — acknowledge with an OK emoji.
 2. `CardSession.start()` — create a CardKit card and reply to the source message with it.
-3. `invoke_stream(user_id, session_id, user_message)` — the gateway saves the turn and dispatches to `curr_runtime`.
+3. `invoke_stream(session_id, user_message)` — the channel uses `self.name` as `channel_id`; the gateway saves the turn and dispatches to `curr_runtime`.
 4. Each yielded `SessionItem` is rendered into the live card by event type.
 5. `CardSession.finish()` — flip streaming mode off so the AI-generating indicator clears.
 
@@ -57,7 +57,7 @@ Construction wires the lark `EventDispatcherHandler`, then spawns a daemon threa
 ## One concern per file. Easy to read.
 
 - `feishu_channel.py` — the `BaseChannel` subclass; `on_message` dispatcher entry + `handle_event` async orchestration.
-- `card_session.py` — `CardSession` coordinator: holds `card_id`, sequence counter, `last_element_id`, and the `tool_state` map; exposes `start()` / `finish()` / `insert_element()` / `set_content()` for the send_* modules.
+- `card_session.py` — `CardSession` coordinator: holds `card_id`, sequence counter, open-text pointer, and the `tool_state` map; exposes `start()` / `finish()` / `insert_element()` (CardKit `append`) / `set_content()` for the send_* modules.
 - `send_streaming_msg.py` — text chunk → open markdown element.
 - `send_streaming_thinking.py` — thinking → blockquote markdown element.
 - `send_tool.py` — `send_tool_call` opens the collapsible panel; `send_tool_result` pairs by `call_id` and updates the same panel's inner markdown to add the result.

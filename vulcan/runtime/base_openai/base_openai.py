@@ -7,6 +7,7 @@ each text delta as a `Message` SessionItem. Subclass to:
     reasoning, etc.) — the base only translates text deltas
 """
 
+import json
 import uuid
 from typing import AsyncIterator
 
@@ -75,9 +76,17 @@ class BaseOpenAIRuntime(BaseRuntime):
     def build_messages(
         self, ctx: InvocationContext
     ) -> list[ChatCompletionMessageParam]:
-        """Convert the session transcript + active turn into ChatCompletion
-        messages. The persona prompt (identity + soul + tool guidance) goes
-        in as a single system message at the head."""
+        """Compose ChatCompletion messages: persona system prompt + replayed
+        history (user/assistant turns parsed back out of the gateway's
+        pre-rendered history message) + the current user input.
+
+        The gateway hands us a single user-role Message whose text is
+        `<previous_conversations>\\n<json>\\n<json>\\n...\\n
+        </previous_conversations>` (raw JSONL of prior SessionItems). Chat
+        Completions supports real multi-turn, so we split it back here and
+        drop items that don't map to a chat role (tool calls, reasoning,
+        etc. — this base runtime doesn't surface those).
+        """
         messages: list[ChatCompletionMessageParam] = []
 
         i = self.agent_config.instruction
@@ -91,25 +100,54 @@ class BaseOpenAIRuntime(BaseRuntime):
                 )
             )
 
-        for item in ctx.session.items:
-            if not isinstance(item, Message):
-                continue
-            text = "".join(getattr(c, "text", "") for c in item.content)
-            if item.role == "user":
-                messages.append(
-                    ChatCompletionUserMessageParam(role="user", content=text)
-                )
-            elif item.role == "assistant":
-                messages.append(
-                    ChatCompletionAssistantMessageParam(
-                        role="assistant", content=text
-                    )
-                )
-            elif item.role == "system":
-                messages.append(
-                    ChatCompletionSystemMessageParam(
-                        role="system", content=text
-                    )
-                )
+        messages.extend(self._split_history(ctx.history_message))
+
+        messages.append(
+            ChatCompletionUserMessageParam(
+                role="user", content=self._message_text(ctx.message)
+            )
+        )
 
         return messages
+
+    @staticmethod
+    def _split_history(
+        history_message: Message,
+    ) -> list[ChatCompletionMessageParam]:
+        text = "".join(getattr(c, "text", "") for c in history_message.content)
+        if not text:
+            return []
+
+        inner = text.removeprefix("<previous_conversations>\n").removesuffix(
+            "\n</previous_conversations>"
+        )
+
+        out: list[ChatCompletionMessageParam] = []
+        for line in inner.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if obj.get("type") != "message":
+                continue
+            role = obj.get("role")
+            content_text = "".join(
+                c.get("text", "") for c in obj.get("content", [])
+            )
+            if role == "user":
+                out.append(
+                    ChatCompletionUserMessageParam(
+                        role="user", content=content_text
+                    )
+                )
+            elif role == "assistant":
+                out.append(
+                    ChatCompletionAssistantMessageParam(
+                        role="assistant", content=content_text
+                    )
+                )
+        return out
+
+    @staticmethod
+    def _message_text(msg: Message) -> str:
+        return "".join(getattr(c, "text", "") for c in msg.content)

@@ -1,6 +1,5 @@
 import time
 import uuid
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from openai.types.chat import ChatCompletion
@@ -13,31 +12,19 @@ if TYPE_CHECKING:
     from ...gateway import Gateway
 
 
-class SessionsCommand(BaseCommand):
+class HelpCommand(BaseCommand):
     def __init__(self, gateway: "Gateway") -> None:
         super().__init__(
-            command="sessions",
-            description="List sessions: /sessions",
+            command="help",
+            description="List all available slash commands: /help",
         )
         self._gateway = gateway
 
     def exec(self, args: list[str]) -> ChatCompletion:
-        session_dir = self._gateway.session_manager.session_dir
-        rows: list[tuple[float, str]] = []
-        if session_dir.exists():
-            for channel_dir in session_dir.iterdir():
-                if not channel_dir.is_dir():
-                    continue
-                for f in channel_dir.glob("*.jsonl"):
-                    ts = f.stat().st_ctime
-                    when = datetime.fromtimestamp(ts).isoformat(
-                        timespec="seconds"
-                    )
-                    rows.append((ts, f"  {channel_dir.name}/{f.stem}  {when}"))
-        rows.sort(reverse=True)
-        text = "Sessions:\n" + (
-            "\n".join(r for _, r in rows) if rows else "  (none)"
-        )
+        rows: list[str] = []
+        for cmd in self._gateway.command_manager.list_commands():
+            rows.append(f"  /{cmd.command} — {cmd.description}")
+        text = "Commands:\n" + ("\n".join(rows) if rows else "  (none)")
 
         return ChatCompletion(
             id=str(uuid.uuid4()),

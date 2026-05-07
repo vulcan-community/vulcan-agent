@@ -17,7 +17,7 @@ class SessionCommand(BaseCommand):
         super().__init__(
             command="session",
             description=(
-                "Show a session's raw JSONL: /session <user>/<session_id>"
+                "Show a session's raw JSONL: /session <channel>/<session_id>"
                 " (or just <session_id> for an unambiguous match)"
             ),
         )
@@ -28,8 +28,8 @@ class SessionCommand(BaseCommand):
         session_dir = self._gateway.session_manager.session_dir
 
         if "/" in spec:
-            user_id, session_id = spec.split("/", 1)
-            path = session_dir / user_id / f"{session_id}.jsonl"
+            channel_id, session_id = spec.split("/", 1)
+            path = session_dir / channel_id / f"{session_id}.jsonl"
         else:
             matches = list(session_dir.glob(f"*/{spec}.jsonl"))
             assert len(matches) == 1, (

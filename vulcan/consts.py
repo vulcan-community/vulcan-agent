@@ -1,2 +1,1 @@
-GATEWAY_USER_ID = "gateway"
-
+GATEWAY_CHANNEL_ID = "gateway"

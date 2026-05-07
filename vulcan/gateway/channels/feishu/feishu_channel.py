@@ -84,7 +84,6 @@ class FeishuChannel(BaseChannel):
         assert message.message_id is not None
         assert message.content is not None
 
-        user_id = self.name
         session_id = message.chat_id
         message_id = message.message_id
         text = json.loads(message.content)["text"]
@@ -106,9 +105,7 @@ class FeishuChannel(BaseChannel):
         session = CardSession(self.client, message_id)
         await session.start()
         try:
-            async for item in self.invoke_stream(
-                user_id, session_id, user_message
-            ):
+            async for item in self.invoke_stream(session_id, user_message):
                 if isinstance(item, Message) and item.role == "assistant":
                     for c in item.content:
                         chunk = getattr(c, "text", "")

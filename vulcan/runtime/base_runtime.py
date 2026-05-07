@@ -18,6 +18,4 @@ class BaseRuntime(ABC):
         self.agent_config = agent_config
 
     @abstractmethod
-    def invoke(
-        self, ctx: InvocationContext
-    ) -> AsyncIterator[SessionItem]: ...
+    def invoke(self, ctx: InvocationContext) -> AsyncIterator[SessionItem]: ...

@@ -12,6 +12,9 @@ class CommandManager:
     def register_command(self, command: BaseCommand) -> None:
         self._commands.append(command)
 
+    def list_commands(self) -> List[BaseCommand]:
+        return list(self._commands)
+
     def match_command(self, command_text: str) -> BaseCommand | None:
         for command in self._commands:
             if command.match_command(command_text):

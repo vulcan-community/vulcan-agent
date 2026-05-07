@@ -20,6 +20,4 @@ async def send_streaming_msg(session: CardSession, chunk: str) -> None:
         session.open_text_id = elem_id
     else:
         session.open_text_buf += chunk
-        await session.set_content(
-            session.open_text_id, session.open_text_buf
-        )
+        await session.set_content(session.open_text_id, session.open_text_buf)

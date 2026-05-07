@@ -7,7 +7,7 @@ from openai.types.responses.response_input_text import ResponseInputText
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from ..consts import GATEWAY_USER_ID
+from ..consts import GATEWAY_CHANNEL_ID
 from ..utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -26,7 +26,7 @@ class MessageMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         body = await request.json()
-        user_id = GATEWAY_USER_ID
+        channel_id = GATEWAY_CHANNEL_ID
         session_id = request.headers.get("x-session-id", "default")
         text = body["messages"][-1]["content"]
         runtime_name = body["model"]
@@ -44,7 +44,7 @@ class MessageMiddleware(BaseHTTPMiddleware):
         )
 
         completion = await self.gateway.invoke(
-            user_id, session_id, user_message, runtime_name=runtime_name
+            channel_id, session_id, user_message, runtime_name=runtime_name
         )
         return JSONResponse(completion.model_dump())
 

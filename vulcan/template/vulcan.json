@@ -1,5 +1,22 @@
 {
     "version": "0.1",
-    "runtimes": {},
+    "runtimes": {
+        "base-openai": {
+            "enable": false,
+            "model": {
+                "model": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        },
+        "claude-code": {
+            "enable": false,
+            "model": {
+                "model": "",
+                "base_url": "",
+                "api_key": ""
+            }
+        }
+    },
     "channels": {}
 }

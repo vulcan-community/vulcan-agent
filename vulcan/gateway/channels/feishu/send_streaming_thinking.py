@@ -3,9 +3,7 @@
 from .card_session import CardSession
 
 
-async def send_streaming_thinking(
-    session: CardSession, text: str
-) -> None:
+async def send_streaming_thinking(session: CardSession, text: str) -> None:
     if not text:
         return
     # Close the open text element so subsequent text starts fresh below

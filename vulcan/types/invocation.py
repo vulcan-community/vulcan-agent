@@ -1,10 +1,8 @@
-from openai.types.chat import ChatCompletionUserMessageParam
+from openai.types.conversations.message import Message
 from pydantic import BaseModel
-
-from .session import Session
 
 
 class InvocationContext(BaseModel):
-    user_id: str
-    session: Session
-    message: ChatCompletionUserMessageParam
+    channel_id: str
+    history_message: Message
+    message: Message
