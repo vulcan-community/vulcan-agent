@@ -28,6 +28,7 @@ class ClaudeCodeRuntime(BaseRuntime):
             AssistantMessage,
             ClaudeAgentOptions,
             ClaudeSDKClient,
+            StreamEvent,
             UserMessage,
         )
 
@@ -50,6 +51,11 @@ class ClaudeCodeRuntime(BaseRuntime):
             env=env,
             setting_sources=setting_sources,
             max_thinking_tokens=4000,
+            # Ask the SDK to forward the raw Anthropic stream events so
+            # we can yield per-chunk text/thinking deltas — otherwise the
+            # SDK only emits one `AssistantMessage` at the end with the
+            # fully assembled text, which looks like "no streaming".
+            include_partial_messages=True,
             system_prompt={
                 "type": "preset",
                 "preset": "claude_code",
@@ -67,14 +73,24 @@ class ClaudeCodeRuntime(BaseRuntime):
             )
             await client.query(query)
             async for msg in client.receive_response():
-                # AssistantMessage holds the model's blocks: text, thinking,
-                # and tool-use calls.
-                if isinstance(msg, AssistantMessage):
+                # StreamEvent carries raw Anthropic API events; we pull
+                # text_delta / thinking_delta out of them for progressive
+                # rendering in channels.
+                if isinstance(msg, StreamEvent):
+                    item = self._stream_event_to_item(msg.event)
+                    if item is not None:
+                        yield item
+                # AssistantMessage arrives with fully-assembled blocks at
+                # block-completion boundaries. We already streamed text
+                # and thinking via deltas, so here we only surface
+                # non-text artifacts (tool_use).
+                elif isinstance(msg, AssistantMessage):
                     for block in msg.content:
-                        item = self._block_to_item(block)
+                        item = self._non_text_block_to_item(block)
                         if item is not None:
                             yield item
-                # UserMessage echoes tool results from the agent's tool runs.
+                # UserMessage echoes tool results from the agent's tool
+                # runs. These are block-granular; no delta needed.
                 elif isinstance(msg, UserMessage):
                     content = msg.content
                     if isinstance(content, list):
@@ -82,6 +98,34 @@ class ClaudeCodeRuntime(BaseRuntime):
                             item = self._block_to_item(block)
                             if item is not None:
                                 yield item
+
+    def _stream_event_to_item(self, event: dict) -> SessionItem | None:
+        """Translate a raw Anthropic stream event into a delta SessionItem.
+        Only `content_block_delta` events with `text_delta` /
+        `thinking_delta` are surfaced; everything else (start/stop, tool
+        input json deltas, message-level events) is ignored and picked up
+        later via the assembled `AssistantMessage`.
+        """
+        if event.get("type") != "content_block_delta":
+            return None
+        delta = event.get("delta") or {}
+        dtype = delta.get("type")
+        if dtype == "text_delta":
+            text = delta.get("text") or ""
+            return assistant_message(text) if text else None
+        if dtype == "thinking_delta":
+            thinking = delta.get("thinking") or ""
+            return reasoning_item(thinking) if thinking else None
+        return None
+
+    def _non_text_block_to_item(self, block) -> SessionItem | None:
+        """Filter variant of `_block_to_item` that skips text/thinking —
+        those are streamed via deltas to avoid double-emission."""
+        from claude_agent_sdk import TextBlock, ThinkingBlock
+
+        if isinstance(block, (TextBlock, ThinkingBlock)):
+            return None
+        return self._block_to_item(block)
 
     def _block_to_item(self, block) -> SessionItem | None:
         from claude_agent_sdk import (
