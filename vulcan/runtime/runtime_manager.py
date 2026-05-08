@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Literal
 
 from ..types.agent import AgentConfig
@@ -32,6 +33,7 @@ class RuntimeManager:
         cls: type[BaseRuntime],
         cfg: RuntimeConfig | None,
         agent_config: AgentConfig,
+        skills_dir: Path | None = None,
     ) -> None:
         """Probe one runtime type and record its status.
 
@@ -40,7 +42,9 @@ class RuntimeManager:
         is only added to `self._runtimes` when it is both installed and
         enabled in config; otherwise we just record the status.
         """
-        instance = cls(name=name, agent_config=agent_config)
+        instance = cls(
+            name=name, agent_config=agent_config, skills_dir=skills_dir
+        )
 
         if not instance.is_installed():
             self.status[name] = "uninstalled"

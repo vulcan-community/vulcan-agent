@@ -31,6 +31,7 @@ from ...utils.messages import (
     tool_call_item,
     tool_output_item,
 )
+from ...utils.skills import load_skills, render_skills_prompt
 from ..base_runtime import BaseRuntime
 
 
@@ -46,8 +47,12 @@ class CodexRuntime(BaseRuntime):
         history_text = message_text(ctx.history_message)
         current_text = message_text(ctx.message)
         persona = self.agent_config.instruction.render()
+        # Codex has no native skill mechanism; eagerly inject every
+        # skill's SKILL.md into the prompt preamble so the agent sees
+        # them. Cost scales with skill count — prune your skills dir.
+        skills_blob = render_skills_prompt(load_skills(self.skills_dir))
         prompt = "\n\n".join(
-            p for p in (persona, history_text, current_text) if p
+            p for p in (persona, skills_blob, history_text, current_text) if p
         )
 
         model_cfg = self.agent_config.model

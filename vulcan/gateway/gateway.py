@@ -79,6 +79,11 @@ class Gateway:
             soul=self.soul_str,
             tool=self.tool_str,
         )
+        # Skills directory is hardcoded under home_dir. Each subdirectory
+        # with a SKILL.md is one skill; every runtime reads from here.
+        skills_dir = self.home_dir / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+
         for runtime_name, runtime_cls in KNOWN_RUNTIMES.items():
             cfg = self.config.runtimes.get(runtime_name)
             agent_config = AgentConfig(
@@ -90,6 +95,7 @@ class Gateway:
                 cls=runtime_cls,
                 cfg=cfg,
                 agent_config=agent_config,
+                skills_dir=skills_dir,
             )
 
     def _register_commands(self) -> None:

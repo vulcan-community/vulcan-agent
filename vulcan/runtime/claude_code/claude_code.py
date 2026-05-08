@@ -1,9 +1,12 @@
 import importlib.util
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Literal
 
 from ...types.invocation import InvocationContext
 from ...types.session import SessionItem
+from ...utils.logger import get_logger
 from ...utils.messages import (
     assistant_message,
     message_text,
@@ -12,6 +15,8 @@ from ...utils.messages import (
     tool_output_item,
 )
 from ..base_runtime import BaseRuntime
+
+logger = get_logger(__name__)
 
 
 class ClaudeCodeRuntime(BaseRuntime):
@@ -42,14 +47,16 @@ class ClaudeCodeRuntime(BaseRuntime):
         if model_cfg.api_key:
             env["ANTHROPIC_API_KEY"] = model_cfg.api_key
 
-        # When we inject custom auth, isolate from local CC settings
-        # so user's OAuth / apiKeyHelper does not override our config.
-        setting_sources = [] if env else None
+        cwd, setting_sources, skills_flag = self._resolve_skills_workspace(
+            has_env=bool(env)
+        )
 
         options = ClaudeAgentOptions(
             model=model_cfg.name or None,
             env=env,
+            cwd=str(cwd) if cwd else None,
             setting_sources=setting_sources,
+            skills=skills_flag,
             max_thinking_tokens=4000,
             # Ask the SDK to forward the raw Anthropic stream events so
             # we can yield per-chunk text/thinking deltas — otherwise the
@@ -157,3 +164,42 @@ class ClaudeCodeRuntime(BaseRuntime):
                 is_error=block.is_error or False,
             )
         return None
+
+    def _resolve_skills_workspace(
+        self, has_env: bool
+    ) -> tuple[
+        Path | None,
+        list[Literal["user", "project", "local"]] | None,
+        Literal["all"] | None,
+    ]:
+        """Wire the SDK to discover skills from Vulcan's `skills_dir/`.
+
+        Claude Code's SDK only looks in `<cwd>/.claude/skills/` (project
+        setting_source) or the user's `~/.claude/skills/` (user source).
+        To expose Vulcan's `<home_dir>/skills/` we symlink
+        `<home_dir>/.claude/skills` → `<home_dir>/skills` and point the
+        SDK at `<home_dir>` as cwd. The user source is always excluded
+        so Vulcan doesn't leak the local `~/.claude/` into isolated
+        deployments.
+
+        Returns (cwd, setting_sources, skills_flag). When `skills_dir`
+        is None, falls back to the previous isolation behavior (empty
+        setting_sources iff custom env is injected, else SDK defaults).
+        """
+        if self.skills_dir is None:
+            return None, ([] if has_env else None), None
+
+        home = self.skills_dir.parent
+        project_skills = home / ".claude" / "skills"
+        project_skills.parent.mkdir(parents=True, exist_ok=True)
+        if not project_skills.exists():
+            try:
+                project_skills.symlink_to(
+                    self.skills_dir, target_is_directory=True
+                )
+            except OSError as e:
+                logger.warning(
+                    f"could not symlink {project_skills} → "
+                    f"{self.skills_dir}: {e}. skills may not load."
+                )
+        return home, ["project"], "all"

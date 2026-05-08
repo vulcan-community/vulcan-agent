@@ -9,6 +9,7 @@ each text delta as a `Message` SessionItem. Subclass to:
 
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from openai import AsyncOpenAI
 from openai.types.chat import (
@@ -23,6 +24,7 @@ from ...types.agent import AgentConfig
 from ...types.invocation import InvocationContext
 from ...types.session import SessionItem
 from ...utils.messages import assistant_message, message_text
+from ...utils.skills import load_skills, render_skills_prompt
 from ..base_runtime import BaseRuntime
 
 
@@ -31,10 +33,14 @@ class BaseOpenAIRuntime(BaseRuntime):
         self,
         name: str,
         agent_config: AgentConfig,
+        skills_dir: Path | None = None,
         description: str = "",
     ) -> None:
         super().__init__(
-            name=name, agent_config=agent_config, description=description
+            name=name,
+            agent_config=agent_config,
+            skills_dir=skills_dir,
+            description=description,
         )
         # AsyncOpenAI validates api_key eagerly at construction, so defer
         # it to first invoke() — otherwise registering base-openai without
@@ -98,11 +104,20 @@ class BaseOpenAIRuntime(BaseRuntime):
         """
         messages: list[ChatCompletionMessageParam] = []
 
-        system_text = self.agent_config.instruction.render()
-        if system_text:
+        # Persona + (if present) eagerly-rendered skills, merged into
+        # one system message. base-openai has no tool protocol, so
+        # skills can only influence behavior via prompt injection.
+        system_parts: list[str] = []
+        persona = self.agent_config.instruction.render()
+        if persona:
+            system_parts.append(persona)
+        skills_blob = render_skills_prompt(load_skills(self.skills_dir))
+        if skills_blob:
+            system_parts.append(skills_blob)
+        if system_parts:
             messages.append(
                 ChatCompletionSystemMessageParam(
-                    role="system", content=system_text
+                    role="system", content="\n\n".join(system_parts)
                 )
             )
 
