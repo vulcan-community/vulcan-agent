@@ -31,7 +31,7 @@ from ...utils.messages import (
     tool_call_item,
     tool_output_item,
 )
-from ...utils.skills import load_skills, render_skills_prompt
+from ...utils.skills import load_skills, render_skills_catalog
 from ..base_runtime import BaseRuntime
 
 
@@ -47,10 +47,16 @@ class CodexRuntime(BaseRuntime):
         history_text = message_text(ctx.history_message)
         current_text = message_text(ctx.message)
         persona = self.agent_config.instruction.render()
-        # Codex has no native skill mechanism; eagerly inject every
-        # skill's SKILL.md into the prompt preamble so the agent sees
-        # them. Cost scales with skill count — prune your skills dir.
-        skills_blob = render_skills_prompt(load_skills(self.skills_dir))
+        # Codex has no native skill mechanism, but it can read files via
+        # its shell tool. Inject just the short catalog (name +
+        # frontmatter description) and grant the agent read access to
+        # the skills dir via `additional_directories` — the agent reads
+        # a specific `SKILL.md` only when a user request matches one of
+        # the catalog entries.
+        skills_blob = render_skills_catalog(
+            load_skills(self.skills_dir),
+            base_dir_hint=str(self.skills_dir) if self.skills_dir else "",
+        )
         prompt = "\n\n".join(
             p for p in (persona, skills_blob, history_text, current_text) if p
         )
@@ -62,14 +68,15 @@ class CodexRuntime(BaseRuntime):
                 "base_url": model_cfg.base_url or None,
             }
         )
-        thread = codex.start_thread(
-            {
-                "model": model_cfg.name or None,
-                "skip_git_repo_check": True,
-                "sandbox_mode": "workspace-write",
-                "approval_policy": "never",
-            }
-        )
+        thread_opts: dict = {
+            "model": model_cfg.name or None,
+            "skip_git_repo_check": True,
+            "sandbox_mode": "workspace-write",
+            "approval_policy": "never",
+        }
+        if self.skills_dir is not None:
+            thread_opts["additional_directories"] = [str(self.skills_dir)]
+        thread = codex.start_thread(thread_opts)
 
         streamed = await thread.run_streamed(prompt)
         # Per-item text length so streaming text/reasoning updates yield

@@ -1,9 +1,12 @@
 import importlib.util
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Literal
 
 from ...types.invocation import InvocationContext
 from ...types.session import SessionItem
+from ...utils.logger import get_logger
 from ...utils.messages import (
     assistant_message,
     message_text,
@@ -11,8 +14,9 @@ from ...utils.messages import (
     tool_call_item,
     tool_output_item,
 )
-from ...utils.skills import load_skills, render_skills_prompt
 from ..base_runtime import BaseRuntime
+
+logger = get_logger(__name__)
 
 
 class ClaudeCodeRuntime(BaseRuntime):
@@ -43,23 +47,16 @@ class ClaudeCodeRuntime(BaseRuntime):
         if model_cfg.api_key:
             env["ANTHROPIC_API_KEY"] = model_cfg.api_key
 
-        # When we inject custom auth, isolate from local CC settings so
-        # the user's OAuth / apiKeyHelper doesn't override our config.
-        setting_sources = [] if env else None
-
-        # Skills are eagerly injected into the persona append, same as
-        # codex/base-openai. We deliberately don't use Claude Code's
-        # native Skill tool + `.claude/skills/` discovery — unified
-        # behavior across runtimes is simpler to reason about at this
-        # project's scale.
-        persona = self.agent_config.instruction.render()
-        skills_blob = render_skills_prompt(load_skills(self.skills_dir))
-        persona_append = "\n\n".join(s for s in (persona, skills_blob) if s)
+        cwd, setting_sources, skills_flag = self._resolve_skills_workspace(
+            has_env=bool(env)
+        )
 
         options = ClaudeAgentOptions(
             model=model_cfg.name or None,
             env=env,
+            cwd=str(cwd) if cwd else None,
             setting_sources=setting_sources,
+            skills=skills_flag,
             max_thinking_tokens=4000,
             # Ask the SDK to forward the raw Anthropic stream events so
             # we can yield per-chunk text/thinking deltas — otherwise the
@@ -69,7 +66,7 @@ class ClaudeCodeRuntime(BaseRuntime):
             system_prompt={
                 "type": "preset",
                 "preset": "claude_code",
-                "append": persona_append,
+                "append": self.agent_config.instruction.render(),
             },
         )
         async with ClaudeSDKClient(options=options) as client:
@@ -167,3 +164,43 @@ class ClaudeCodeRuntime(BaseRuntime):
                 is_error=block.is_error or False,
             )
         return None
+
+    def _resolve_skills_workspace(
+        self, has_env: bool
+    ) -> tuple[
+        Path | None,
+        list[Literal["user", "project", "local"]] | None,
+        Literal["all"] | None,
+    ]:
+        """Wire the SDK to discover Vulcan skills via Claude's native
+        Skill tool.
+
+        Claude Code's SDK only looks for skills under `<cwd>/.claude/skills/`
+        (project setting_source) or `~/.claude/skills/` (user source).
+        To expose Vulcan's `<home_dir>/skills/` we symlink
+        `<home_dir>/.claude/skills` → `<home_dir>/skills` and point the
+        SDK at `<home_dir>` as cwd. `setting_sources=["project"]` keeps
+        us out of the user's global `~/.claude/` so Vulcan doesn't leak
+        whatever personal skills or settings the developer has.
+
+        Returns (cwd, setting_sources, skills_flag). When `skills_dir`
+        is None, returns the auth-isolation fallback (empty
+        setting_sources iff custom env is injected, else SDK defaults).
+        """
+        if self.skills_dir is None:
+            return None, ([] if has_env else None), None
+
+        home = self.skills_dir.parent
+        project_skills = home / ".claude" / "skills"
+        project_skills.parent.mkdir(parents=True, exist_ok=True)
+        if not project_skills.exists():
+            try:
+                project_skills.symlink_to(
+                    self.skills_dir, target_is_directory=True
+                )
+            except OSError as e:
+                logger.warning(
+                    f"could not symlink {project_skills} → "
+                    f"{self.skills_dir}: {e}. skills may not load."
+                )
+        return home, ["project"], "all"
