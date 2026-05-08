@@ -47,6 +47,12 @@ class Gateway:
         self.home_dir = home_dir
         prepare_home_dir(home_dir)
 
+        # Skills directory is hardcoded under home_dir. Each subdirectory
+        # with a SKILL.md is one skill; runtimes and /skill command both
+        # read from here.
+        self.skills_dir = self.home_dir / "skills"
+        self.skills_dir.mkdir(parents=True, exist_ok=True)
+
         self.session_manager = LocalSessionManager(
             session_dir=home_dir / "sessions"
         )
@@ -79,11 +85,6 @@ class Gateway:
             soul=self.soul_str,
             tool=self.tool_str,
         )
-        # Skills directory is hardcoded under home_dir. Each subdirectory
-        # with a SKILL.md is one skill; every runtime reads from here.
-        skills_dir = self.home_dir / "skills"
-        skills_dir.mkdir(parents=True, exist_ok=True)
-
         for runtime_name, runtime_cls in KNOWN_RUNTIMES.items():
             cfg = self.config.runtimes.get(runtime_name)
             agent_config = AgentConfig(
@@ -95,7 +96,7 @@ class Gateway:
                 cls=runtime_cls,
                 cfg=cfg,
                 agent_config=agent_config,
-                skills_dir=skills_dir,
+                skills_dir=self.skills_dir,
             )
 
     def _register_commands(self) -> None:
@@ -108,6 +109,7 @@ class Gateway:
         from .commands.runtime.runtime import RuntimeCommand
         from .commands.session.session import SessionCommand
         from .commands.sessions.sessions import SessionsCommand
+        from .commands.skill.skill import SkillCommand
         from .commands.status.status import StatusCommand
         from .commands.switch.switch import SwitchCommand
         from .commands.version.version import VersionCommand
@@ -120,6 +122,7 @@ class Gateway:
             ConversationsCommand,
             SessionCommand,
             RuntimeCommand,
+            SkillCommand,
             VersionCommand,
             StatusCommand,
             HelpCommand,

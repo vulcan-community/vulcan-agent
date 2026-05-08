@@ -33,7 +33,7 @@ def initial_card_schema() -> dict:
         "schema": "2.0",
         "config": {
             "streaming_mode": True,
-            "summary": {"content": "Vulcan is replying..."},
+            "summary": {"content": "Vulcan 回复中..."},
             "streaming_config": {
                 "print_frequency_ms": {"default": 30},
                 "print_step": {"default": 2},
