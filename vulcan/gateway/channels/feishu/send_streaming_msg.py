@@ -11,6 +11,11 @@ from .card_session import CardSession
 async def send_streaming_msg(session: CardSession, chunk: str) -> None:
     if not chunk:
         return
+    # A text chunk closes any open thinking block — the next thinking
+    # delta starts its own fresh element rather than appending to the
+    # now-stale block above.
+    session.open_think_id = None
+    session.open_think_buf = ""
     session.full_text += chunk
     if session.open_text_id is None:
         elem_id = session.new_id("text")

@@ -58,6 +58,13 @@ class CardSession:
         # fresh element rather than appending to a stale one.
         self.open_text_id: str | None = None
         self.open_text_buf: str = ""
+        # Same pattern for thinking blocks — without this, each token
+        # delta from runtimes with include_partial_messages=True would
+        # produce its own blockquote element instead of one cohesive
+        # block. Reset whenever a non-thinking event (text chunk, tool
+        # call, tool result) lands.
+        self.open_think_id: str | None = None
+        self.open_think_buf: str = ""
         # Running concat of every text chunk ever streamed into this card,
         # across text-element rotations. Used by `finish()` to set the
         # card summary once the stream ends — so the chat preview shows

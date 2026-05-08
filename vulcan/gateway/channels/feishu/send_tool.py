@@ -47,6 +47,8 @@ async def send_tool_call(
     session: CardSession, call_id: str, name: str, args_json: str
 ) -> None:
     session.open_text_id = None
+    session.open_think_id = None
+    session.open_think_buf = ""
     panel_id = session.new_id("tool")
     body_id = session.new_id("toolbody")
     session.tool_state[call_id] = (body_id, args_json)
@@ -65,6 +67,8 @@ async def send_tool_result(
     session: CardSession, call_id: str, output: str, is_error: bool
 ) -> None:
     session.open_text_id = None
+    session.open_think_id = None
+    session.open_think_buf = ""
     state = session.tool_state.get(call_id)
     if state is None:
         return
