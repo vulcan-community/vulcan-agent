@@ -27,6 +27,23 @@ from .send_tool import send_tool_call, send_tool_result
 logger = get_logger(__name__)
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    """asyncio.Task done-callback that surfaces any unretrieved exception
+    to our logger. Without this, exceptions in tasks spawned by
+    `create_task` are silently eaten until the task is garbage-collected,
+    and even then show up only as "Task exception was never retrieved"
+    in stderr — which is effectively invisible.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "feishu handle_event task failed",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
 class FeishuChannel(BaseChannel):
     def __init__(
         self,
@@ -65,10 +82,21 @@ class FeishuChannel(BaseChannel):
         threading.Thread(target=self.ws.start, daemon=True).start()
         logger.info(f"feishu channel '{self.name}' listening")
 
+    # Hard ceiling on a single runtime turn. If the SDK hangs (stuck
+    # network I/O with no exception), this is what rescues the user from
+    # an indefinitely-spinning card.
+    INVOKE_TIMEOUT_SECONDS = 180
+
     def on_message(self, event: P2ImMessageReceiveV1) -> None:
         """Lark dispatches callbacks from inside its WS event loop. Schedule
-        the async handler on the running loop instead of starting a new one."""
-        asyncio.get_running_loop().create_task(self.handle_event(event))
+        the async handler on the running loop instead of starting a new one.
+
+        The done-callback is essential — without it, any uncaught exception
+        in `handle_event` is silently eaten by the asyncio task machinery
+        (and only logged on GC, which is effectively invisible).
+        """
+        task = asyncio.get_running_loop().create_task(self.handle_event(event))
+        task.add_done_callback(_log_task_exception)
 
     async def handle_event(self, event: P2ImMessageReceiveV1) -> None:
         """One incoming Feishu message: react, drive the runtime via the
@@ -102,34 +130,64 @@ class FeishuChannel(BaseChannel):
         session = CardSession(self.client, message_id)
         await session.start()
         try:
-            async for item in self.invoke_stream(conversation_id, user_message):
-                if isinstance(item, Message) and item.role == "assistant":
-                    for c in item.content:
-                        chunk = getattr(c, "text", "")
-                        await send_streaming_msg(session, chunk)
-                elif isinstance(item, ResponseReasoningItem):
-                    if item.content is not None:
-                        for rc in item.content:
-                            await send_streaming_thinking(session, rc.text)
-                elif isinstance(item, ResponseFunctionToolCallItem):
-                    await send_tool_call(
-                        session, item.call_id, item.name, item.arguments
-                    )
-                elif isinstance(item, ResponseFunctionToolCallOutputItem):
-                    if isinstance(item.output, str):
-                        output_text = item.output
-                    else:
-                        output_text = json.dumps(
-                            [c.model_dump() for c in item.output],
-                            ensure_ascii=False,
-                        )
-                    await send_tool_result(
-                        session,
-                        item.call_id,
-                        output_text,
-                        is_error=item.status == "incomplete",
-                    )
+            try:
+                async with asyncio.timeout(self.INVOKE_TIMEOUT_SECONDS):
+                    async for item in self.invoke_stream(
+                        conversation_id, user_message
+                    ):
+                        await self._render_item(session, item)
+            except TimeoutError:
+                logger.warning(
+                    f"feishu invoke timeout ({self.INVOKE_TIMEOUT_SECONDS}s):"
+                    f" chat={conversation_id}"
+                )
+                await self._render_error(
+                    session,
+                    f"Runtime timed out after "
+                    f"{self.INVOKE_TIMEOUT_SECONDS}s — no response.",
+                )
+            except Exception as e:
+                logger.exception(
+                    f"feishu invoke_stream error: chat={conversation_id}"
+                )
+                await self._render_error(session, f"{type(e).__name__}: {e}")
         finally:
             await session.finish()
 
         logger.info(f"feishu reply done: chat={conversation_id}")
+
+    async def _render_item(self, session: CardSession, item) -> None:
+        if isinstance(item, Message) and item.role == "assistant":
+            for c in item.content:
+                chunk = getattr(c, "text", "")
+                await send_streaming_msg(session, chunk)
+        elif isinstance(item, ResponseReasoningItem):
+            if item.content is not None:
+                for rc in item.content:
+                    await send_streaming_thinking(session, rc.text)
+        elif isinstance(item, ResponseFunctionToolCallItem):
+            await send_tool_call(
+                session, item.call_id, item.name, item.arguments
+            )
+        elif isinstance(item, ResponseFunctionToolCallOutputItem):
+            if isinstance(item.output, str):
+                output_text = item.output
+            else:
+                output_text = json.dumps(
+                    [c.model_dump() for c in item.output],
+                    ensure_ascii=False,
+                )
+            await send_tool_result(
+                session,
+                item.call_id,
+                output_text,
+                is_error=item.status == "incomplete",
+            )
+
+    async def _render_error(self, session: CardSession, detail: str) -> None:
+        """Best-effort error surface onto the open card so users see
+        something — swallows nested failures so `finish()` still runs."""
+        try:
+            await send_streaming_msg(session, f"\n\n**Error:** {detail}")
+        except Exception:
+            logger.exception("failed to render error onto feishu card")
