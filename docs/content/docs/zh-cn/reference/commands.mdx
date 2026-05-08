@@ -25,11 +25,12 @@ description: 所有已注册斜杠命令的参数与输出格式。
 | `/conversations` | —                                             | 列出所有 channel 下的全部 conversation。                                             |
 | `/session`       | `<channel>/<session_id>` 或 `<session_id>`    | 显示指定 session 的原始 JSONL。                                                      |
 | `/runtime`       | —                                             | 列出所有已知运行时及其状态（`enabled` / `disabled` / `uninstalled`）。               |
+| `/skill`         | `<subcommand> [args]`                         | 管理 `<home_dir>/skills/` 下本地安装的 skill，以及查询远端 registry。                |
 | `/version`       | —                                             | 显示已安装的 `vulcan-agent` 版本。                                                   |
 | `/status`        | —                                             | 显示当前 conversation 指向的 session，以及它的运行时和模型配置。                     |
 | `/help`          | —                                             | 列出所有可用斜杠命令。                                                               |
 
-顺序即 `Gateway._register_commands` 的注册顺序：`new`、`resume`、`switch`、`sessions`、`conversations`、`session`、`runtime`、`version`、`status`、`help`。
+顺序即 `Gateway._register_commands` 的注册顺序：`new`、`resume`、`switch`、`sessions`、`conversations`、`session`、`runtime`、`skill`、`version`、`status`、`help`。
 
 ## 两层身份
 
@@ -254,6 +255,72 @@ Runtimes:
 - `[*]` 标记**当前 session** 的运行时 —— 顺着 conversation 指针找到当前 session，再读它的 sidecar meta 解析；未写入时回落到 `config.default_runtime`。只有状态为 `enabled` 的行会被标记。
 - `<status>` 取值：`enabled`、`disabled`、`uninstalled`，定义见 [运行时](./runtimes)。
 - 名称列左对齐，宽度 16 字符。
+
+## `/skill`
+
+管理 Vulcan 共享的 skill。skill 本地安装在 `<home_dir>/skills/<name>/` 下，也可通过远端 skill registry 发现和拉取。
+
+dispatch 基于首位位置参数（`args[0]`）—— 五个子命令：`list`、`remove`、`search`、`add`、`show`。子命令缺失或未知时，回复会列出这五个动词。所有子命令都会把未预期的异常包成：
+
+```
+/skill <verb> failed: <ExceptionType>: <message>
+```
+
+### list
+
+列出 `<home_dir>/skills/` 下本地安装的 skill，每行显示名称和本地元数据里的一行简介。
+
+**参数** —— 无。
+
+### remove
+
+删除本地已安装的 skill 目录（`rm -r <skills_dir>/<name>/`）。不访问远端 registry。
+
+**参数**
+
+| 位置 | 名称   | 必填 | 说明                                   |
+| ---- | ------ | ---- | -------------------------------------- |
+| 0    | `name` | 是   | `skills_dir` 下 skill 目录的名称。     |
+
+### search
+
+向远端 registry 做自由文本搜索。调用 `GET https://skills.volces.com/api/v1/search?q=<query>&limit=20`，对每条结果打印 `slug`、`version`、`displayName`、`summary`。
+
+**参数**
+
+| 位置 | 名称    | 必填 | 说明                         |
+| ---- | ------- | ---- | ---------------------------- |
+| 0..n | `query` | 是   | 自由文本查询，多个 token 合并。 |
+
+### add
+
+从 registry 安装一个 skill 到 `<skills_dir>/<slug>/`。
+
+1. `GET https://skills.volces.com/api/v1/skills/<slug>`，拿到最新 version。
+2. `GET https://skills.volces.com/api/v1/download?slug=<slug>&version=<v>` 下载 ZIP。
+3. 解压到 `<skills_dir>/<slug>/`。
+
+目标目录已存在时拒绝覆盖 —— 先 `/skill remove <slug>` 再重装。
+
+**参数**
+
+| 位置 | 名称   | 必填 | 说明                   |
+| ---- | ------ | ---- | ---------------------- |
+| 0    | `slug` | 是   | 要安装的 registry slug。|
+
+### show
+
+通过 `GET https://skills.volces.com/api/v1/skills/<slug>` 拉取并打印完整详情。收到 `404` 时，自动用该 slug 触发一次 `search`，列出相似结果。
+
+**参数**
+
+| 位置 | 名称   | 必填 | 说明                   |
+| ---- | ------ | ---- | ---------------------- |
+| 0    | `slug` | 是   | 要查询的 registry slug。|
+
+### Registry
+
+远端接口 base 地址为 `https://skills.volces.com`。所有 HTTP 调用使用 10 秒超时。不发送任何鉴权 header —— 当前 registry 按匿名读取处理。
 
 ## `/version`
 

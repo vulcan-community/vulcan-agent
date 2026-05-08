@@ -83,6 +83,52 @@ OpenAI 兼容的 Chat Completions 运行时。
 - `approval_policy="never"` 阻止 CLI 交互确认。Vulcan 以非交互模式运行。
 - `skip_git_repo_check=True` 允许在非 git 仓库下运行。
 
+## 各运行时的 skills 加载策略
+
+Vulcan 将 skills 统一放在 `<home_dir>/skills/` 下，每个包含 `SKILL.md` 的子目录即一个 skill（YAML frontmatter 写 `name` + `description`，正文写用法）。这些内容如何送达模型，因运行时而异 —— 有的每轮都为全部 skills 付 token 成本，有的按需 lazy load。
+
+| 运行时        | 策略                                | 是否 lazy        | 备注                                                                                                  |
+| ------------- | ----------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------- |
+| `base-openai` | 全文 prompt 注入                    | 否               | 成本随 skill 数量线性增长；每轮对所有 skill 都要付全量 token。                                        |
+| `codex`       | 目录 catalog + `additional_directories` | 逐 skill lazy    | agent 只看到 `name` + `description`；匹配时通过 shell 工具读取对应 `SKILL.md`。                       |
+| `claude-code` | 原生 Claude Code Skill 工具         | SDK 原生 lazy    | SDK 通过 `setting_sources=["project"]` 在定制 `cwd` 下发现 skills；调用 Skill 工具时才拉取正文。     |
+
+加载器本身（`vulcan/utils/skills.py`）与具体运行时无关：`load_skills` 遍历目录，`parse_skill_description` 从 frontmatter 抽取 `description:`，两个 renderer 分别产出完整 blob 与精简 catalog。
+
+### `base-openai`
+
+无 tool 协议，没有 lazy 的余地。`build_messages` 调用 `render_skills_prompt(load_skills(skills_dir))`，把每个 `SKILL.md` 正文拼在 `# Available skills` 标题下，与 persona 合并到首条 `system` 消息中。每轮都会为全部 skill 付完整的 prompt token 成本。
+
+### `codex`
+
+Codex 没有原生 skill 概念，但 shell 工具可以读文件。`invoke()` 调用 `render_skills_catalog(...)` 并传入 `base_dir_hint=str(skills_dir)`，输出每行一个 skill 的精简 catalog（`- **name** — description`），指向 `<skills_dir>/<name>/SKILL.md`；同时在 thread 选项中传 `additional_directories=[str(skills_dir)]` 赋予 CLI 读权限。用户请求与某个 catalog 条目匹配时，agent 才按需 `cat` 对应文件 —— 正文 token 只对实际读取的那部分付费。
+
+### `claude-code`
+
+Claude Code SDK 原生支持 Skill 工具，但仅在 `<cwd>/.claude/skills/`（project source）或 `~/.claude/skills/`（user source）下搜索 skill。Vulcan 的 `_resolve_skills_workspace` 负责搭桥：首次 invoke 时在 `<home_dir>/.claude/skills → <home_dir>/skills` 上懒创建 symlink，然后将 `cwd=<home_dir>`、`setting_sources=["project"]`、`skills="all"` 传给 `ClaudeAgentOptions`。SDK 只把索引注入 system prompt，仅在 agent 调用 Skill 工具时才拉取完整 `SKILL.md` 正文。`setting_sources=["project"]` 把 Vulcan 与用户个人的 `~/.claude/` 隔离开，避免全局 skills / settings 污染进来。
+
+如果你在 `<home_dir>/.claude/` 下看到 `skills/` 疑惑它的来源 —— 就是 `claude-code` 运行时首次 invoke 时创建的 symlink，指回共享的 `<home_dir>/skills/`。
+
+### 添加一个 skill
+
+在 `<home_dir>/skills/` 下放一个含 `SKILL.md` 的目录：
+
+```
+<home_dir>/skills/my-skill/SKILL.md
+```
+
+```markdown
+---
+name: my-skill
+description: 一句话说明 —— 用于 catalog 与 Claude Code 索引。
+---
+
+完整使用说明。base-openai 每轮都会把这段内联到 system prompt；
+codex 通过 shell 工具按需读取；claude-code 通过 Skill 工具拉取。
+```
+
+如果想从 registry 安装 skill，使用 `/skill add <slug>` 命令（参见 [commands 参考](./commands.mdx)）。
+
 ## `is_installed()`
 
 每个具体运行时都实现 `is_installed() -> bool`。基类不静态导入可选 SDK；导入延迟到 `invoke()`，使模块始终可加载。

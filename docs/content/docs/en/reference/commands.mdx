@@ -25,11 +25,12 @@ Arguments are the remaining whitespace-separated tokens.
 | `/conversations` | —                                            | List every conversation across all channels.                                                 |
 | `/session`       | `<channel>/<session_id>` or `<session_id>`   | Show a session's raw JSONL.                                                                  |
 | `/runtime`       | —                                            | List every known runtime and its status (`enabled` / `disabled` / `uninstalled`).            |
+| `/skill`         | `<subcommand> [args]`                        | Manage skills installed under `<home_dir>/skills/` and query the remote registry.            |
 | `/version`       | —                                            | Show the installed `vulcan-agent` version.                                                   |
 | `/status`        | —                                            | Show this conversation's current session plus its runtime and model configuration.           |
 | `/help`          | —                                            | List all available slash commands.                                                           |
 
-Order is the registration order in `Gateway._register_commands`: `new`, `resume`, `switch`, `sessions`, `conversations`, `session`, `runtime`, `version`, `status`, `help`.
+Order is the registration order in `Gateway._register_commands`: `new`, `resume`, `switch`, `sessions`, `conversations`, `session`, `runtime`, `skill`, `version`, `status`, `help`.
 
 ## Two-layer identity
 
@@ -254,6 +255,72 @@ Runtimes:
 - `[*]` marks **the current session's** runtime — resolved by following the conversation pointer to its current session, then reading that session's sidecar meta, falling back to `config.default_runtime` when no binding has been written yet. Only rows whose status is `enabled` can be marked.
 - `<status>` is one of `enabled`, `disabled`, `uninstalled` — see [Runtimes](./runtimes) for definitions.
 - Name field is left-padded to 16 characters.
+
+## `/skill`
+
+Manage Vulcan's shared skills. Skills are installed locally under `<home_dir>/skills/<name>/` and can be discovered and pulled from the remote skill registry.
+
+Dispatch is on the first positional argument (`args[0]`) — the five verbs are `list`, `remove`, `search`, `add`, `show`. Unknown or missing verbs reply with usage text naming all five. Every subcommand wraps unexpected exceptions as:
+
+```
+/skill <verb> failed: <ExceptionType>: <message>
+```
+
+### list
+
+List skills installed locally under `<home_dir>/skills/`, one per line with name and the one-line description pulled from the skill's local metadata.
+
+**Arguments** — none.
+
+### remove
+
+Delete a locally installed skill directory (`rm -r <skills_dir>/<name>/`). Remote registry is not consulted.
+
+**Arguments**
+
+| Position | Name   | Required | Description                                   |
+| -------- | ------ | -------- | --------------------------------------------- |
+| 0        | `name` | yes      | Name of a skill directory under `skills_dir`. |
+
+### search
+
+Free-text search against the remote registry. Calls `GET https://skills.volces.com/api/v1/search?q=<query>&limit=20` and prints each hit's `slug`, `version`, `displayName`, and `summary`.
+
+**Arguments**
+
+| Position | Name    | Required | Description                         |
+| -------- | ------- | -------- | ----------------------------------- |
+| 0..n     | `query` | yes      | Free-text query; tokens are joined. |
+
+### add
+
+Install a skill from the registry into `<skills_dir>/<slug>/`.
+
+1. `GET https://skills.volces.com/api/v1/skills/<slug>` to resolve the latest version.
+2. `GET https://skills.volces.com/api/v1/download?slug=<slug>&version=<v>` to fetch the ZIP.
+3. Extract into `<skills_dir>/<slug>/`.
+
+Refuses to overwrite an existing install — run `/skill remove <slug>` first.
+
+**Arguments**
+
+| Position | Name   | Required | Description           |
+| -------- | ------ | -------- | --------------------- |
+| 0        | `slug` | yes      | Registry slug to add. |
+
+### show
+
+Fetch and print the full detail for a skill via `GET https://skills.volces.com/api/v1/skills/<slug>`. On `404`, automatically runs a `search` with the slug and lists similar results.
+
+**Arguments**
+
+| Position | Name   | Required | Description             |
+| -------- | ------ | -------- | ----------------------- |
+| 0        | `slug` | yes      | Registry slug to query. |
+
+### Registry
+
+Remote endpoint base is `https://skills.volces.com`. All HTTP calls use a 10-second timeout. No auth header is sent — the registry is currently treated as anonymous-read.
 
 ## `/version`
 

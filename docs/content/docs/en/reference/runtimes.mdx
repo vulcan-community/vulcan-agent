@@ -83,6 +83,52 @@ Wraps `openai-codex-sdk`, which itself wraps the bundled `codex` CLI binary over
 - `approval_policy="never"` prevents the CLI from blocking on confirmation prompts. Vulcan runs non-interactively.
 - `skip_git_repo_check=True` allows operation outside a git repository.
 
+## Skills per runtime
+
+Vulcan stores skills in a shared directory at `<home_dir>/skills/`. Each subdirectory containing a `SKILL.md` (YAML frontmatter with `name` + `description`, body with usage) is one skill. How that content reaches the model differs per runtime — some pay token cost for every skill every turn, others lazy-load.
+
+| Runtime       | Strategy                            | Lazy?            | Notes                                                                                                   |
+| ------------- | ----------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------- |
+| `base-openai` | Full-body prompt injection          | No               | Cost scales with skill count; every turn pays full token cost for every skill.                          |
+| `codex`       | Catalog + `additional_directories`  | Per-skill lazy   | Agent sees `name` + `description` only; reads `SKILL.md` via its shell tool when relevant.              |
+| `claude-code` | Native Claude Code Skill tool       | SDK-native lazy  | SDK discovers via `setting_sources=["project"]` on a vendored `cwd`; body is lazy-loaded via Skill tool. |
+
+The loader itself (`vulcan/utils/skills.py`) is runtime-agnostic: `load_skills` walks the directory, `parse_skill_description` pulls `description:` out of frontmatter, and two renderers produce either the full blob or a short catalog.
+
+### `base-openai`
+
+No tool protocol, no lazy option. `build_messages` calls `render_skills_prompt(load_skills(skills_dir))`, which inlines every `SKILL.md` body under a `# Available skills` header and merges the result into the leading `system` message alongside the persona. Every turn pays the full prompt-token cost for every skill.
+
+### `codex`
+
+Codex has no native skill concept but its shell tool can read files. `invoke()` calls `render_skills_catalog(...)` with `base_dir_hint=str(skills_dir)`, which emits a one-line-per-skill catalog (`- **name** — description`) pointing at `<skills_dir>/<name>/SKILL.md`, then passes `additional_directories=[str(skills_dir)]` in the thread options so the CLI has read access. When a user request matches a catalog entry, the agent `cat`s the specific file on demand — body tokens are only paid for what gets read.
+
+### `claude-code`
+
+The Claude Code SDK natively supports a Skill tool, but it only discovers skills under `<cwd>/.claude/skills/` (project source) or `~/.claude/skills/` (user source). Vulcan's `_resolve_skills_workspace` bridges the gap: on first invoke it lazily creates a symlink `<home_dir>/.claude/skills → <home_dir>/skills`, then passes `cwd=<home_dir>`, `setting_sources=["project"]`, and `skills="all"` to `ClaudeAgentOptions`. The SDK auto-injects only an index into the system prompt and fetches the full `SKILL.md` body only when the agent calls the Skill tool. `setting_sources=["project"]` keeps Vulcan out of the developer's personal `~/.claude/` so their global skills and settings do not leak in.
+
+If you look under `<home_dir>/.claude/` and wonder where `skills/` came from — the `claude-code` runtime created the symlink on its first invocation; it points back at the shared `<home_dir>/skills/`.
+
+### Adding a skill
+
+Drop a directory under `<home_dir>/skills/` containing a `SKILL.md`:
+
+```
+<home_dir>/skills/my-skill/SKILL.md
+```
+
+```markdown
+---
+name: my-skill
+description: One-line pitch used in catalogs and the Claude Code index.
+---
+
+Full usage body. base-openai inlines this every turn; codex reads it on
+demand via its shell tool; claude-code fetches it via the Skill tool.
+```
+
+To install a skill from the registry, use the `/skill add <slug>` command (see the [commands reference](./commands.mdx)).
+
 ## `is_installed()`
 
 Every concrete runtime implements `is_installed() -> bool`. The base class stores no static import of the optional SDK; imports are deferred into `invoke()` so the module loads regardless.
